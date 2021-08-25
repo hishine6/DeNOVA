@@ -142,11 +142,9 @@ int nova_dedup_FACT_init(struct super_block *sb){
 		target_entry = (struct fact_entry*)nova_get_block(sb,target_index);
 
 		nova_memunlock_range(sb,target_entry,64,&irq_flags);
-
 		memcpy_to_pmem_nocache(target_entry, &fill,64);
 		nova_memlock_range(sb,target_entry,64,&irq_flags);
 	}
-
 	return 1;
 }
 
@@ -223,14 +221,6 @@ int nova_dedup_FACT_read(struct super_block *sb, u64 index){
 	return 0;
 }
 
-// Is fact entry empty?
-int nova_dedup_is_empty(struct fact_entry target){
-	if(target.count == 0)
-		return 1;
-	return 0;
-}
-
-// Insert new FACT entry
 int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_data* lookup){
 	unsigned long irq_flags=0;
 	struct fact_entry  te; // target entry
@@ -244,8 +234,8 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 	/* 4GB Environment - 19 bit */
 	if(FACT_TABLE_INDEX_MAX == 1048575){
 		index = lookup->fingerprint[0];
-		index = index<<8 | lookup->fingerprint[1];
-		index = index<<3 | ((lookup->fingerprint[2] & 224)>>5);
+		index = index << 8 | lookup->fingerprint[1];
+		index = index << 3 | ((lookup->fingerprint[2] & 224)>>5);
 	}
 	/* 1TB, 750GB Environment - 27 bit */
 	else if(FACT_TABLE_INDEX_MAX == 196607999 || FACT_TABLE_INDEX_MAX == 268435455){    
@@ -259,15 +249,17 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 		return 2;
 
 	// Read Entries until it finds a match, or finds a empty slot
+	// TODO bug fix
 	do{
 		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + index * NOVA_FACT_ENTRY_SIZE;
 		pmem_te = (struct fact_entry*)nova_get_block(sb,target_index);
 		__copy_to_user(&te,pmem_te,sizeof(struct fact_entry));  
-		if(strncmp(te.fingerprint, lookup->fingerprint,FINGERPRINT_SIZE) == 0){ // duplicate found
+		
+		if(strncmp(te.fingerprint, lookup->fingerprint,FINGERPRINT_SIZE) == 0 && te.count != 0){ // duplicate found
 			ret = 1;
 			break;
 		}
-		if(nova_dedup_is_empty(te)){ // duplicate not found, it's unique!
+		else if(te.count == 0 && next == 0){ // duplicate not found, it's unique!
 			set_bit(index,FACT_free_list->bitmap); // set the bit of index
 			ret =0;
 			break;
@@ -284,7 +276,8 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 	}while(1);
 
 	if(ret){ // duplicate data page detected
-		te.count++; // Increase Update Count
+	    // TODO atomic operation, no DRAM	
+	    te.count++; // Increase Update Count
 		printk("Duplicate Page detected on index %lld, ref_count:%lld\n",index,te.count>>32);
 	}
 	else{ // new entry should be written
@@ -447,8 +440,8 @@ int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool 
 			// Set prev->next to next
 			if(te.prev != 0){
 				temp_next =te.next;
-				index = te.prev;
-				target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + index * NOVA_FACT_ENTRY_SIZE;
+				target_index = te.prev;
+				target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + target_index * NOVA_FACT_ENTRY_SIZE;
 				pmem_te = (struct fact_entry*)nova_get_block(sb,target_index);
 
 				nova_memunlock_range(sb,pmem_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
