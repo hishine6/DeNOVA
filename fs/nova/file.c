@@ -27,8 +27,7 @@
 
 /* ------ NOVA DEDUP by KHJ --------- */
 static int nova_dedup(struct file *filp){
-	nova_dedup_test(filp);	
-	return 1;
+	return nova_dedup_test(filp);	
 }
 /* ---------------------------------- */
 
@@ -551,7 +550,7 @@ do_dax_mapping_read(struct file *filp, char __user *buf,
 		}
 
 		nvmm = get_nvmm(sb, sih, entryc, index);
-		printk("READ: Reading pgoff(%lu ~ %lu), from datapage %lu",index,index+(nr/PAGE_SIZE)-1,nvmm);
+		//printk("READ: Reading pgoff(%lu ~ %lu), from datapage %lu",index,index+(nr/PAGE_SIZE)-1,nvmm);
 		dax_mem = nova_get_block(sb, (nvmm << PAGE_SHIFT));
 
 memcpy:
@@ -773,7 +772,7 @@ static ssize_t do_nova_cow_file_write(struct file *filp,
 		else
 			file_size = cpu_to_le64(inode->i_size);
 
-		printk("WRTIE(offset: %lu, %d pages)\n",start_blk,allocated);
+		//printk("WRTIE(offset: %lu, %d pages)\n",start_blk,allocated);
 		nova_init_file_write_entry(sb, sih, &entry_data, epoch_id,
 					start_blk, allocated, blocknr, time,
 					file_size);
