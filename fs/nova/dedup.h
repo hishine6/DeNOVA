@@ -12,6 +12,8 @@
 #include <linux/list.h>
 #include <linux/fs.h>
 #include <linux/fsnotify.h>
+#include <linux/ktime.h>
+#include <linux/timekeeping.h>
 
 // SHA1
 #include <crypto/hash.h>
