@@ -27,7 +27,7 @@ int nova_dedup_queue_push(u64 new_address, u64 target_inode_number){
 	new_data->target_inode_number = target_inode_number;
 	mutex_unlock(&dqueue.lock);
 
-	printk("dqueue-PUSH(Write Entry Address: %llu, Inode Number: %llu)\n",new_address,target_inode_number);
+	//printk("dqueue-PUSH(Write Entry Address: %llu, Inode Number: %llu)\n",new_address,target_inode_number);
 	return 0;
 }
 
@@ -141,7 +141,7 @@ int nova_dedup_crosscheck(struct nova_file_write_entry *entry
 // Clear FACT, set FACT_free_table, FACT locks
 int nova_dedup_FACT_init(struct super_block *sb){
 	unsigned long i;
-	unsigned long start = FACT_TABLE_START;
+	unsigned long start = 0;
 	unsigned long end = FACT_TABLE_INDEX_MAX;
 	unsigned long irq_flags=0;
 	unsigned long target_index;
@@ -165,6 +165,65 @@ int nova_dedup_FACT_init(struct super_block *sb){
 	return 1;
 }
 
+// Recover FACT
+int nova_dedup_FACT_recovery(struct super_block *sb){
+	unsigned long i, start = 0;
+	unsigned long end = FACT_TABLE_INDEX_MAX;
+	unsigned long target_index;
+	unsigned long irq_flags=0;
+	unsigned long u_count, r_count;
+
+	struct fact_entry *target_entry;
+
+	FACT_free_list = kzalloc(sizeof(struct DeNOVA_bm),GFP_KERNEL);
+	FACT_free_list->bitmap_size = FACT_TABLE_INDEX_MAX;
+	FACT_free_list->bitmap = kvzalloc(FACT_TABLE_INDEX_MAX,GFP_KERNEL);
+
+	for(i = start; i<=end;i++){
+		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + i * NOVA_FACT_ENTRY_SIZE;
+		target_entry = (struct fact_entry*)nova_get_block(sb,target_index);
+		
+		r_count = target_entry->count>>32;
+		u_count = target_entry->count & (((long)1<<32)-1);
+
+		// Rebuild FACT_free_list
+		if(r_count > 0){
+			// TODO Check if block is in free list?
+			
+			set_bit(target_index,FACT_free_list->bitmap); // set the bit of index
+		}
+		
+		// Set Update Count to 0
+		if(r_count != 0){
+			nova_memunlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE, &irq_flags);
+			PERSISTENT_BARRIER();
+			target_entry->count -= r_count;
+			nova_flush_buffer(&target_entry->count,CACHELINE_SIZE,1);
+			nova_memlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE, &irq_flags);
+		}
+
+		// Check reordering process
+		if(target_index < FACT_TABLE_INDIRECT_AREA_START_INDEX && target_entry->prev != 0){
+			if(target_entry->prev == target_index){
+				// TODO undo reorder
+			}
+			else{
+				// TODO continue reorder
+			}
+		}
+	}
+
+	return 1;
+}
+
+// TODO 
+/*
+	 int nova_dedup_FACT_reorder(){
+
+	return 1;
+}
+*/
+
 // Check FACT index range(of FACT)
 int nova_dedup_FACT_index_check(u64 index){
 	if(index > FACT_TABLE_INDEX_MAX){
@@ -187,6 +246,7 @@ int nova_dedup_FACT_update_count(struct super_block *sb, u64 index){
 		return 1;
 
 	// Read Actual Index
+	// If this place has something, meaning that the entry has something
 	target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + index * NOVA_FACT_ENTRY_SIZE;
 	target_entry = (struct fact_entry *)nova_get_block(sb,target_index);
 	target_index = target_entry->delete_entry;
@@ -235,7 +295,8 @@ int nova_dedup_FACT_read(struct super_block *sb, u64 index){
 
 	//printk("index:%lld, ref_count:%d, up_count:%d, prev:%lld, next:%lld, block_address: %lld\n",
 			//index,r_count,u_count,prev,next,block_address);
-	return 0;}
+	return 0;
+}
 
 int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_data* lookup){
 	unsigned long irq_flags=0;
@@ -245,8 +306,6 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 	u64 prev_index =0;
 	u64 target_index;
 	int ret=0;
-	int debugg=0;
-	struct timespec t0, t1;
 
 	/* Index SIZE */
 	/* 4GB Environment - 19 bit */
@@ -268,9 +327,6 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 
 	// Read Entries until it finds a match, or finds a empty slot
 	do{
-		if(debugg==0)
-			getnstimeofday(&t0);
-		debugg++;
 		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + index * NOVA_FACT_ENTRY_SIZE;
 		pmem_te = (struct fact_entry*)nova_get_block(sb,target_index);
 		__copy_to_user(&te,pmem_te,sizeof(struct fact_entry));  
@@ -282,9 +338,6 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 		else if(te.count == 0 && te.next == 0){ // duplicate not found, it's unique!
 			set_bit(index,FACT_free_list->bitmap); // set the bit of index
 			ret =0;
-			if(debugg%10 == 0){
-				getnstimeofday(&t1);
-			}
 			break;
 		}
 
@@ -499,7 +552,8 @@ int nova_dedup_test(struct file * filp){
 	struct super_block *sb = garbage_inode->i_sb;
 
 	// How many deduplications are going to be done each time?
-	int dedup_loop_count = 100;
+	int dedup_loop_count = 1024;
+	struct timespec t0, t1;
 
 	// For read phase
 	struct nova_file_write_entry *target_entry;	// Target write entry to deduplicate
@@ -540,6 +594,7 @@ int nova_dedup_test(struct file * filp){
 	buf = kmalloc(DATABLOCK_SIZE,GFP_KERNEL);
 	fingerprint = kmalloc(FINGERPRINT_SIZE,GFP_KERNEL);
 
+	//getnstimeofday(&t0);
 	do{
 		// Pop TWE(Target Write Entry)
 		entry_address = nova_dedup_queue_get_next_entry(&target_inode_number);
@@ -709,6 +764,9 @@ out:
 		}
 	}while(dedup_loop_count--);
 terminate: 
+	
+	//getnstimeofday(&t1);
+	//printk("%ld sec %ld nsec  spent\n",t1.tv_sec-t0.tv_sec,t1.tv_nsec - t0.tv_nsec);	
 	kfree(buf);
 	kfree(fingerprint);
 	return 0;

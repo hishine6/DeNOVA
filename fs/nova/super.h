@@ -79,7 +79,7 @@ struct nova_super_block {
 //#define FACT_TABLE_INDEX_MAX (unsigned long)196607999 // 750 * 2^18 - 1 (750GB ENV)
 #define	HEAD_RESERVED_BLOCKS (unsigned long)63 + ((unsigned long)(FACT_TABLE_INDEX_MAX+1)*64)/4096
 
- #define FACT_TABLE_INDIRECT_AREA_START_INDEX 524288 // 2^19 (4G ENV)
+#define FACT_TABLE_INDIRECT_AREA_START_INDEX 524288 // 2^19 (4G ENV)
 // #define FACT_TABLE_INDIRECT_AREA_START_INDEX 134217728 // 2^27 (1T, 750G ENV)
 
 // 64 - FACT entry size
