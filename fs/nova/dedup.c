@@ -216,13 +216,57 @@ int nova_dedup_FACT_recovery(struct super_block *sb){
 	return 1;
 }
 
-// TODO 
-/*
-	 int nova_dedup_FACT_reorder(){
+int nova_dedup_FACT_reorder(struct super_block *sb, u64 head_index,int hops){
+	struct fact_entry* target_entry;
+	u64 index;
+	u64 target_index;
+	u64 last_index=0;
+	int i;
+	int *reorder_seq;
+	unsigned long irq_flags=0;
 
+	
+	reorder_seq = kmalloc(hops * sizeof(int),GFP_KERNEL);
+
+
+	// head 'prev' to head_index
+	target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + head_index * NOVA_FACT_ENTRY_SIZE;
+	target_entry = (struct fact_entry *)nova_get_block(sb,target_index);
+
+	nova_memunlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+	PERSISTENT_BARRIER();
+	target_entry->prev = head_index;
+	nova_flush_buffer(&target_entry->prev,CACHELINE_SIZE,1);
+	nova_memlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+
+	// TODO Modify the prev of all nodes
+
+	// head 'prev' to last node
+	target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + head_index * NOVA_FACT_ENTRY_SIZE;
+	target_entry = (struct fact_entry *)nova_get_block(sb,target_index);
+
+	nova_memunlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+	PERSISTENT_BARRIER();
+	target_entry->prev = last_index;
+	nova_flush_buffer(&target_entry->prev,CACHELINE_SIZE,1);
+	nova_memlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+
+	// TODO Modify the next of all nodes
+	
+	// head 'prev' to 0
+	target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + head_index * NOVA_FACT_ENTRY_SIZE;
+	target_entry = (struct fact_entry *)nova_get_block(sb,target_index);
+
+	nova_memunlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+	PERSISTENT_BARRIER();
+	target_entry->prev = 0;
+	nova_flush_buffer(&target_entry->prev,CACHELINE_SIZE,1);
+	nova_memlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+
+
+	kfree(reorder_seq);
 	return 1;
 }
-*/
 
 // Check FACT index range(of FACT)
 int nova_dedup_FACT_index_check(u64 index){
