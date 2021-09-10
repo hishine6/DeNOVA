@@ -27,9 +27,11 @@
 #define FINGERPRINT_SIZE 20
 #define MAX_DATAPAGE_PER_WRITEENTRY 32
 
-#define DEDUP_DONE 0
-#define DEDUP_NEEDED 1
+#define DEDUP_NEEDED 0
+#define DEDUP_DONE 1
 #define IN_PROCESS 2
+
+#define REORDER_THRESHOLD 150
 
 /* nova_dedup_queue
 	 queue of entries that needs to be deduplicated
@@ -79,12 +81,13 @@ struct fingerprint_lookup_data{
 
 
 int nova_dedup_FACT_init(struct super_block *sb);
+int nova_dedup_FACT_read(struct super_block *sb, u64 index);
 
 int nova_dedup_test(struct file *);
 int nova_dedup_queue_push(u64,u64);
 int nova_dedup_queue_init(void);
 
 int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool check);
-
+int nova_dedup_fingerprint(unsigned char * datapage, unsigned char *ret_fingerprint);
 
 #endif
