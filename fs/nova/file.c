@@ -766,24 +766,13 @@ static ssize_t do_nova_cow_file_write(struct file *filp,
 		nova_memunlock_range(sb, kmem + offset, bytes, &irq_flags);
 		// For experiment 
 		
-		getrawmonotonic(&t0);
-		for (i = 0; i < total_blocks; i++) {
-			if (i == total_blocks - 1)
-				copy_from_user(k_buf, buf + chunk, len - DATABLOCK_SIZE * (total_blocks - 1));
-			else
-				copy_from_user(k_buf, buf + chunk, DATABLOCK_SIZE);
-			nova_dedup_fingerprint(k_buf, fingerprint);
-			chunk += DATABLOCK_SIZE;
-		}
-		getrawmonotonic(&t1);
-		fpt = t1.tv_nsec - t0.tv_nsec;
 
 		getrawmonotonic(&t0);
 		copied = bytes - memcpy_to_pmem_nocache(kmem + offset,
 				buf, bytes);
 
 		getrawmonotonic(&t1);
-		//printk("%lu %ld %lu %ld\n",total_blocks,fpt,bytes, t1.tv_nsec-t0.tv_nsec);
+		printk("%lu %ld\n",bytes, t1.tv_nsec-t0.tv_nsec);
 
 		nova_memlock_range(sb, kmem + offset, bytes, &irq_flags);
 		NOVA_END_TIMING(memcpy_w_nvmm_t, memcpy_time);
