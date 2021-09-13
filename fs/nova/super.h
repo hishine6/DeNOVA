@@ -59,27 +59,26 @@ struct nova_super_block {
 /* NOVA DEDUP KHJ */
 /*
  * 4G Environment
- * Block 64 - 5183 Static FACT Table (64MB)
  * Index 0 ~ (2^20 - 1)
- 
+
+ * 32G Environment
+ * Index 0 ~ (2^23 - 1)
+
  * 750G Environment
- * Block 64 ~ 3072063 (almost 12GB)
  * Index 0 ~ (750*2^18 - 1)
 
- * 750G Environment
- * Block 64 ~ 3072063 (almost 12GB)
- * Index 0 ~ *(750*2^18 - 1)
-
  * 1T Environment
- * Block 64 ~ 1310783 (16GB)
  * Index 0 ~ (2^28 - 1)
  */
- #define FACT_TABLE_INDEX_MAX 1048575 // 2^20 - 1  (4G ENV)
+// #define FACT_TABLE_INDEX_MAX 1048575 // 2^20 - 1  (4G ENV)
+#define FACT_TABLE_INDEX_MAX 8388607// 2^23 - 1 (32G ENV)
 // #define FACT_TABLE_INDEX_MAX 268435455 // 2^28 -1 (1TB ENV)
-//#define FACT_TABLE_INDEX_MAX (unsigned long)196607999 // 750 * 2^18 - 1 (750GB ENV)
+// #define FACT_TABLE_INDEX_MAX (unsigned long)196607999 // 750 * 2^18 - 1 (750GB ENV)
+
 #define	HEAD_RESERVED_BLOCKS (unsigned long)63 + ((unsigned long)(FACT_TABLE_INDEX_MAX+1)*64)/4096
 
-#define FACT_TABLE_INDIRECT_AREA_START_INDEX 524288 // 2^19 (4G ENV)
+// #define FACT_TABLE_INDIRECT_AREA_START_INDEX 524288 // 2^19 (4G ENV)
+#define FACT_TABLE_INDIRECT_AREA_START_INDEX 4194304 // 2^22 (32G ENV)
 // #define FACT_TABLE_INDIRECT_AREA_START_INDEX 134217728 // 2^27 (1T, 750G ENV)
 
 // 64 - FACT entry size
