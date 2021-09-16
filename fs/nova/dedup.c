@@ -165,6 +165,30 @@ int nova_dedup_FACT_init(struct super_block *sb){
 	return 1;
 }
 
+// For debugging, show how much FACT is utilized
+int nova_dedup_FACT_utilize(struct super_block *sb){
+	unsigned long i;
+	unsigned long start = 0;
+	unsigned long end = FACT_TABLE_INDEX_MAX;
+	unsigned long target_index;
+	struct fact_entry *target_entry;
+	int total =0;
+	int used=0;
+
+	for(i =start; i<=end;i++){
+		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + i * NOVA_FACT_ENTRY_SIZE;
+		target_entry = (struct fact_entry*)nova_get_block(sb,target_index);
+
+		if(target_entry->count != 0)
+			used++;
+		total++;
+	}
+	
+	printk("Utilization total: %d, used %d\n",total, used);
+
+	return 1;
+}
+
 // Recover FACT
 int nova_dedup_FACT_reorder_undo(struct super_block *sb, u64 head_index){
 	// Scan through 'next' to fix the prev of each node
@@ -178,11 +202,11 @@ int nova_dedup_FACT_reorder_undo(struct super_block *sb, u64 head_index){
 	curr_index = target_entry->next;
 
 	do{
-			target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + curr_index * NOVA_FACT_ENTRY_SIZE;
-			target_entry = (struct fact_entry*)nova_get_block(sb,target_index);
-			target_entry->prev = prev_index;
-			prev_index = curr_index;
-			curr_index = target_entry->next;
+		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + curr_index * NOVA_FACT_ENTRY_SIZE;
+		target_entry = (struct fact_entry*)nova_get_block(sb,target_index);
+		target_entry->prev = prev_index;
+		prev_index = curr_index;
+		curr_index = target_entry->next;
 	}while(target_entry->next != head_index);
 
 	return 0;
@@ -194,7 +218,7 @@ int nova_dedup_FACT_reorder_recover(struct super_block *sb, u64 head_index, u64 
 	unsigned long next_index = head_index;
 	unsigned long curr_index = head_index;
 	struct fact_entry *target_entry;
-	
+
 	target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + curr_index * NOVA_FACT_ENTRY_SIZE;
 	target_entry = (struct fact_entry*)nova_get_block(sb,target_index);
 	curr_index = target_entry->prev;
@@ -233,8 +257,7 @@ int nova_dedup_FACT_recovery(struct super_block *sb){
 
 		// Rebuild FACT_free_list
 		if(r_count > 0){
-			// TODO Check if block is in free list?
-
+			// TODO Check if block is in free list
 			set_bit(target_index,FACT_free_list->bitmap); // set the bit of index
 		}
 
@@ -274,11 +297,12 @@ int nova_dedup_FACT_reorder(struct super_block *sb, u64 head_index){
 	int hops=0;
 
 	printk("Reorder Start\n");
-	
+
+	// Count hops of a linked list to reorder
 	do{
 		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + curr_index * NOVA_FACT_ENTRY_SIZE;
 		target_entry = (struct fact_entry *)nova_get_block(sb,target_index);
-		hops++;
+		hops++; 
 		curr_index = target_entry->next;
 	}while(target_entry->next != head_index);
 
@@ -334,6 +358,16 @@ int nova_dedup_FACT_index_check(u64 index){
 		return 1;
 	}
 	return 0;
+}
+
+// Check FACT index head
+int nova_dedup_FACT_index_head(u64 index){
+	if(nova_dedup_FACT_index_check(index))
+		return 0;
+	if(index < FACT_TABLE_INDIRECT_AREA_START_INDEX)
+		return 0;
+	else 
+		return 1;
 }
 
 // Update Count after tail has been updated. 
@@ -395,8 +429,8 @@ int nova_dedup_FACT_read(struct super_block *sb, u64 index){
 	block_address = target->block_address;
 	next = target->next;
 	prev = target->prev;
-	
-	printk("read!\n");
+
+	//printk("read!\n");
 	//printk("index:%lld, ref_count:%d, up_count:%d, prev:%lld, next:%lld, block_address: %lld\n",
 	//index,r_count,u_count,prev,next,block_address);
 	return 0;
@@ -411,12 +445,20 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 	u64 prev_index = 0;
 	u64 target_index;
 	int ret=0;
+	int hop=0;
+
 	/* Index SIZE */
 	/* 4GB Environment - 19 bit */
 	if(FACT_TABLE_INDEX_MAX == 1048575){
 		index = lookup->fingerprint[0];
 		index = index << 8 | lookup->fingerprint[1];
 		index = index << 3 | ((lookup->fingerprint[2] & 224)>>5);
+	}
+	/* 32GB Environment - 22 bit */
+	else if(FACT_TABLE_INDEX_MAX == 8388607){
+		index = lookup->fingerprint[0];
+		index = index << 8 | lookup->fingerprint[1];
+		index = index << 6 | ((lookup->fingerprint[2] & 252)>>2);
 	}
 	/* 1TB, 750GB Environment - 27 bit */
 	else if(FACT_TABLE_INDEX_MAX == 196607999 || FACT_TABLE_INDEX_MAX == 268435455){    
@@ -449,7 +491,11 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 			ret = 0;
 			break;
 		}
+		hop++;
 	}while(1);
+
+	if(hop > 6)
+		printk("hops to this index is %d\n",hop);
 
 	if(ret){ // duplicate data page detected
 		nova_memunlock_range(sb,pmem_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
@@ -459,7 +505,7 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 		nova_memlock_range(sb,pmem_te, NOVA_FACT_ENTRY_SIZE,&irq_flags);
 	}
 	else{ // new entry should be written
-		if(index == head_index){ // write in DAA
+		if(index == head_index && te.count==0){
 			prev_index = 0;
 		}
 		else{	// write in IAA
@@ -467,13 +513,13 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 			index = find_next_zero_bit(FACT_free_list->bitmap,FACT_free_list->bitmap_size,FACT_TABLE_INDIRECT_AREA_START_INDEX);
 			set_bit(index,FACT_free_list->bitmap);
 		}
-		
+
 		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + index * NOVA_FACT_ENTRY_SIZE;
 		pmem_te = (struct fact_entry*)nova_get_block(sb,target_index);
 
 		__copy_to_user(&te,pmem_te,sizeof(struct fact_entry));  
-		
-		nova_dedup_copy_fingerprint(te.fingerprint,lookup->fingerprint);
+
+		nova_dedup_copy_fingerprint(lookup->fingerprint,te.fingerprint);	
 		te.block_address = lookup->block_address;
 		te.count = 1;
 		te.prev = prev_index;
@@ -483,11 +529,11 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 		nova_memunlock_range(sb,pmem_te, NOVA_FACT_ENTRY_SIZE, &irq_flags);
 		memcpy_to_pmem_nocache(pmem_te, &te, NOVA_FACT_ENTRY_SIZE - 12); // don't write delete, pdding
 		nova_memlock_range(sb, pmem_te, NOVA_FACT_ENTRY_SIZE, &irq_flags);
-	
+
 		if(index != head_index){
 			target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + prev_index * NOVA_FACT_ENTRY_SIZE;
 			pmem_te = (struct fact_entry*)nova_get_block(sb,target_index);
-		
+
 			// set previous index's next field to 'index'
 			nova_memunlock_range(sb,pmem_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
 			PERSISTENT_BARRIER();
@@ -608,6 +654,7 @@ int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool 
 	struct fact_entry* pmem_te; // pmem target entry
 	u64 index = 0;
 	u64 target_index;
+	u64 temp_next,temp_prev;
 
 	// Check Index Range of delete entry
 	if(nova_dedup_FACT_index_check(blocknr))
@@ -638,24 +685,36 @@ int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool 
 		}
 
 		if((pmem_te->count>>32) == 0){ // Free data page
-			/* 
-			   Deleting process should be fast, this reordering can take place later
+			// Deleting process should be fast, this reordering can take place later
 			// Set prev->next to next
-			if(te.prev != 0){
-			temp_next =te.next;
-			target_index = te.prev;
-			target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + target_index * NOVA_FACT_ENTRY_SIZE;
-			pmem_te = (struct fact_entry*)nova_get_block(sb,target_index);
+			temp_next = pmem_te->next;
+			temp_prev = pmem_te->prev;
 
-			nova_memunlock_range(sb,pmem_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
-			PERSISTENT_BARRIER();
-			pmem_te->next = temp_next;
-			nova_flush_buffer(&pmem_te->count,CACHELINE_SIZE,1);
-			nova_memlock_range(sb,pmem_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+			if(temp_prev != 0){ // if it's not the head
+				target_index = temp_prev;
+				target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + target_index * NOVA_FACT_ENTRY_SIZE;
+				pmem_te = (struct fact_entry*)nova_get_block(sb,target_index);
+
+				nova_memunlock_range(sb,pmem_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+				PERSISTENT_BARRIER();
+				pmem_te->next = temp_next;
+				nova_flush_buffer(&pmem_te->count,CACHELINE_SIZE,1);
+				nova_memlock_range(sb,pmem_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+			}
+			// Set next->prev to prev
+			if(nova_dedup_FACT_index_head(temp_next)){ // If the next is not head (meaning it's not the last node)
+				target_index = temp_next;
+				target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + target_index * NOVA_FACT_ENTRY_SIZE;
+				pmem_te = (struct fact_entry*)nova_get_block(sb,target_index);
+
+				nova_memunlock_range(sb,pmem_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+				PERSISTENT_BARRIER();
+				pmem_te->prev = temp_prev;
+				nova_flush_buffer(&pmem_te->count,CACHELINE_SIZE,1);
+				nova_memlock_range(sb,pmem_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
 			}
 			// Set bit to 0 in deleted FACT entry
 			clear_bit(index,FACT_free_list->bitmap);// clear the bit of index
-			 */
 			return 1;
 		}
 		else // Don't free data page
@@ -672,7 +731,7 @@ int nova_dedup_test(struct file * filp){
 	struct super_block *sb = garbage_inode->i_sb;
 
 	// How many deduplications are going to be done each time?
-	int dedup_loop_count = 10;
+	int dedup_loop_count = 1024;
 
 	// Reorder variable
 	int reorder_condition;
@@ -776,8 +835,8 @@ int nova_dedup_test(struct file * filp){
 
 				nvmm = get_nvmm(sb,target_sih,target_entry,index);
 				dax_mem = nova_get_block(sb,(nvmm << PAGE_SHIFT));
-				
-				
+
+
 				left = __copy_to_user(buf,dax_mem,DATABLOCK_SIZE); // Read data page
 				if(left){
 					nova_dbg("%s ERROR!: left %lu\n",__func__,left);
@@ -809,7 +868,6 @@ int nova_dedup_test(struct file * filp){
 				}
 			// Get the number of new write entries needed to be appended.
 			if(num_new_entry == 0){
-				//printk("All Unique Data Pages\n");
 				nova_dedup_TWE_update(sb,target_sih,entry_address,duplicate_check);
 				goto out;
 			}
@@ -892,6 +950,7 @@ out:
 		iput(target_inode);	// Release Inode
 	}while(dedup_loop_count--);
 
+	nova_dedup_FACT_utilize(sb);
 	//getnstimeofday(&t1);
 	//printk("%ld sec %ld nsec  spent\n",t1.tv_sec-t0.tv_sec,t1.tv_nsec - t0.tv_nsec);	
 	kfree(buf);
