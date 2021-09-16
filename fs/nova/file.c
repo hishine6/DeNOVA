@@ -478,6 +478,8 @@ do_dax_mapping_read(struct file *filp, char __user *buf,
 	loff_t isize, pos;
 	size_t copied = 0, error = 0;
 	INIT_TIMING(memcpy_time);
+	INIT_TIMING(t0);
+	INIT_TIMING(t1);
 
 	pos = *ppos;
 	index = pos >> PAGE_SHIFT;
@@ -573,12 +575,14 @@ memcpy:
 skip_verify:
 		NOVA_START_TIMING(memcpy_r_nvmm_t, memcpy_time);
 
+		getrawmonotonic(&t0);
 		if (!zero)
 			left = __copy_to_user(buf + copied,
 					dax_mem + offset, nr);
 		else
 			left = __clear_user(buf + copied, nr);
-
+		getrawmonotonic(&t1);
+		printk("READ: %lu %ld\n",nr, t1.tv_nsec - t0.tv_nsec);
 		NOVA_END_TIMING(memcpy_r_nvmm_t, memcpy_time);
 
 		if (left) {
@@ -664,12 +668,9 @@ static ssize_t do_nova_cow_file_write(struct file *filp,
 	// DEDUP NOVA KHJ
 	struct timespec t0, t1;
 	char *k_buf;
-	int chunk =0;
-	int i;
 	unsigned char *fingerprint;
 	fingerprint = kmalloc(FINGERPRINT_SIZE, GFP_KERNEL);
 	k_buf = kmalloc(DATABLOCK_SIZE, GFP_KERNEL);
-	u64 fpt=0;
 
 	if (len == 0)
 		return 0;
