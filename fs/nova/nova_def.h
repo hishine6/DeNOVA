@@ -154,5 +154,6 @@ static inline void nova_flush_buffer(void *buf, uint32_t len, bool fence)
 
 /* NOVA DEDUP KHJ */
 #define NOVA_FACT_ENTRY_SIZE 64
-#define EMULATION_CYCLE 180
+#define EMULATION_WRITE_CYCLE 0//140
+#define EMULATION_READ_CYCLE 0//400
 #endif /* _LINUX_NOVA_DEF_H */
