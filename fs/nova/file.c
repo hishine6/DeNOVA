@@ -477,6 +477,7 @@ do_dax_mapping_read(struct file *filp, char __user *buf,
 	unsigned long offset;
 	loff_t isize, pos;
 	size_t copied = 0, error = 0;
+	
 	INIT_TIMING(memcpy_time);
 	INIT_TIMING(t0);
 	INIT_TIMING(t1);
@@ -576,9 +577,10 @@ skip_verify:
 		NOVA_START_TIMING(memcpy_r_nvmm_t, memcpy_time);
 
 		getrawmonotonic(&t0);
-		if (!zero)
-			left = __copy_to_user(buf + copied,
-					dax_mem + offset, nr);
+		if (!zero){
+			left = __copy_to_user(buf + copied,dax_mem + offset, nr);
+			nova_dedup_read_emulate(nr);
+		}
 		else
 			left = __clear_user(buf + copied, nr);
 		getrawmonotonic(&t1);
@@ -765,16 +767,14 @@ static ssize_t do_nova_cow_file_write(struct file *filp,
 		//		nova_dbg("Write: %p\n", kmem);
 		NOVA_START_TIMING(memcpy_w_nvmm_t, memcpy_time);
 		nova_memunlock_range(sb, kmem + offset, bytes, &irq_flags);
-		// For experiment 
-		
 
-		getrawmonotonic(&t0);
+		
+		//getrawmonotonic(&t0);
 		copied = bytes - memcpy_to_pmem_nocache(kmem + offset,
 				buf, bytes);
-
-		getrawmonotonic(&t1);
-		printk("%lu %ld\n",bytes, t1.tv_nsec-t0.tv_nsec);
-
+		//getrawmonotonic(&t1);
+		//printk("write: %lu %ld\n",bytes, t1.tv_nsec - t0.tv_nsec);
+	
 		nova_memlock_range(sb, kmem + offset, bytes, &irq_flags);
 		NOVA_END_TIMING(memcpy_w_nvmm_t, memcpy_time);
 
