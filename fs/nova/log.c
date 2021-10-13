@@ -152,7 +152,6 @@ unsigned int nova_free_old_entry(struct super_block *sb,
 	}
 
 	old_nvmm = get_nvmm(sb, sih, entryc, pgoff);
-
 	if (!delete_dead) {
 		ret = nova_append_data_to_snapshot(sb, entryc, old_nvmm,
 				num_free, epoch_id);
