@@ -570,7 +570,7 @@ static int nova_dedup_free_blocks(struct super_block *sb, unsigned long blocknr,
 
   /* NOVA DEDUP KHJ */
   for(i=t_block_low; i<=t_block_high;i++){
-    if(nova_dedup_is_duplicate(sb, i,false) != 0){
+		if(nova_dedup_is_duplicate(sb, i,false) != 0){
       block_low = t_block_low;
       block_high = i;
       if(i != t_block_high)

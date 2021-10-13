@@ -40,7 +40,9 @@
 struct nova_dedup_queue_entry{
   u64 write_entry_address;
   u64 target_inode_number;
-  struct list_head list;
+  //u64 start_sec;
+	//u64 start_nsec;
+	struct list_head list;
 };
 
 struct nova_dedup_queue{
@@ -90,6 +92,6 @@ int nova_dedup_queue_push(u64,u64);
 int nova_dedup_queue_init(void);
 
 int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool check);
-int nova_dedup_fingerprint(unsigned char * datapage, unsigned char *ret_fingerprint);
+int nova_dedup_fingerprint(int interval, unsigned char * datapage, unsigned char *ret_fingerprint);
 
 #endif

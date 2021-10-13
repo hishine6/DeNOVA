@@ -576,15 +576,12 @@ memcpy:
 skip_verify:
 		NOVA_START_TIMING(memcpy_r_nvmm_t, memcpy_time);
 
-		getrawmonotonic(&t0);
 		if (!zero){
 			left = __copy_to_user(buf + copied,dax_mem + offset, nr);
 			nova_dedup_read_emulate(nr);
 		}
 		else
 			left = __clear_user(buf + copied, nr);
-		getrawmonotonic(&t1);
-		printk("READ: %lu %ld\n",nr, t1.tv_nsec - t0.tv_nsec);
 		NOVA_END_TIMING(memcpy_r_nvmm_t, memcpy_time);
 
 		if (left) {
@@ -667,24 +664,17 @@ static ssize_t do_nova_cow_file_write(struct file *filp,
 	u32 time;
 	unsigned long irq_flags = 0;
 
-	// DEDUP NOVA KHJ
-	struct timespec t0, t1;
-	char *k_buf;
-	unsigned char *fingerprint;
-	fingerprint = kmalloc(FINGERPRINT_SIZE, GFP_KERNEL);
-	k_buf = kmalloc(DATABLOCK_SIZE, GFP_KERNEL);
-
 	if (len == 0)
 		return 0;
 
 	NOVA_START_TIMING(do_cow_write_t, cow_write_time);
-
 
 	if (!access_ok(buf, len)) {
 		ret = -EFAULT;
 		goto out;
 	}
 	pos = *ppos;
+
 	if (filp->f_flags & O_APPEND)
 		pos = i_size_read(inode);
 
@@ -766,15 +756,9 @@ static ssize_t do_nova_cow_file_write(struct file *filp,
 		/* Now copy from user buf */
 		//		nova_dbg("Write: %p\n", kmem);
 		NOVA_START_TIMING(memcpy_w_nvmm_t, memcpy_time);
-		nova_memunlock_range(sb, kmem + offset, bytes, &irq_flags);
-
-		
-		//getrawmonotonic(&t0);
+		nova_memunlock_range(sb, kmem + offset, bytes, &irq_flags);		
 		copied = bytes - memcpy_to_pmem_nocache(kmem + offset,
 				buf, bytes);
-		//getrawmonotonic(&t1);
-		//printk("write: %lu %ld\n",bytes, t1.tv_nsec - t0.tv_nsec);
-	
 		nova_memlock_range(sb, kmem + offset, bytes, &irq_flags);
 		NOVA_END_TIMING(memcpy_w_nvmm_t, memcpy_time);
 
@@ -790,14 +774,12 @@ static ssize_t do_nova_cow_file_write(struct file *filp,
 		else
 			file_size = cpu_to_le64(inode->i_size);
 
-		//printk("WRTIE(offset: %lu, %d pages)\n",start_blk,allocated);
 		nova_init_file_write_entry(sb, sih, &entry_data, epoch_id,
 				start_blk, allocated, blocknr, time,
 				file_size);
 
 		ret = nova_append_file_write_entry(sb, pi, inode,
 				&entry_data, &update);
-
 		if (ret) {
 			nova_dbg("%s: append inode entry failed\n", __func__);
 			ret = -ENOSPC;
