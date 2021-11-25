@@ -345,7 +345,7 @@
 334	common	rseq			__x64_sys_rseq
 # Dedup 
 335 common	dedup			__x64_sys_dedup
-
+336 common  dummy			__x64_sys_dummy
 
 # don't use numbers 387 through 423, add new calls after the last
 # 'common' entry

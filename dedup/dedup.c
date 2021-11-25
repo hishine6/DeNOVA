@@ -26,3 +26,8 @@ int ksys_dedup(void){
 SYSCALL_DEFINE0(dedup){
   return ksys_dedup();
 }
+
+SYSCALL_DEFINE0(dummy){
+	return 0;
+}
+
