@@ -14,7 +14,7 @@ system. The additional features include ...
 - DWQ (Deduplication Work Queue): A kernel queue to determine the candidates for deduplication.
 
 More specific information can be found in the following paper:
-(TBD)
+(IPDPS22-will be updated)
 
 ### Working In Progress(TODOs)
 - We have found minor bugs during the reordering process. It has been detached for debugging.
