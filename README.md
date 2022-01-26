@@ -23,9 +23,7 @@ More specific information can be found in the following paper:
 - In order to improve the performance of overwrite, a new delete process is being employed.
 
 ### Building DeNOVA
-Refer to [Building and Using NOVA](##building-and-using-nova)
-
-
+To build DeNOVA refer to [Building and Using NOVA](##building-and-using-nova) in below. Before building the kernel image, it might need minor configuration. The size of the FACT is determined by the capacity of NVM. Currently, FACT is a static table. The size of the FACT should be modified accordingly to the NVM capacity. The modifications can be done in 'fs/nova/super.h'. Furthermore, the current version includes empty cycles during the read/write path to emulate the latency of NVM devices. This should be deleted when using an actual NVM device.
 
 # 2. NOVA: NOn-Volatile memory Accelerated log-structured file system
 
