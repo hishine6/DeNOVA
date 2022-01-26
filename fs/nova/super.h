@@ -70,11 +70,11 @@ struct nova_super_block {
  * 1T Environment
  * Index 0 ~ (2^28 - 1)
  */
-// #define FACT_TABLE_INDEX_MAX 1048575 // 2^20 - 1  (4G ENV)
-//#define FACT_TABLE_INDEX_MAX 8388607// 2^23 - 1 (32G ENV)
-#define FACT_TABLE_INDEX_MAX 16777215// 2^24 - 1 (64G ENV)
-// #define FACT_TABLE_INDEX_MAX 268435455 // 2^28 -1 (1TB ENV)
-// #define FACT_TABLE_INDEX_MAX (unsigned long)196607999 // 750 * 2^18 - 1 (750GB ENV)
+// #define FACT_TABLE_INDEX_MAX 2097151 // 2^21 - 1  (4G ENV)
+//#define FACT_TABLE_INDEX_MAX 16777215 // 2^24 - 1 (32G ENV)
+#define FACT_TABLE_INDEX_MAX 33554431 // 2^25 - 1 (64G ENV)
+// #define FACT_TABLE_INDEX_MAX 536870911 // 2^29 -1  (1TB ENV)
+// #define FACT_TABLE_INDEX_MAX (unsigned long)196607999 // 750 * 2^19 - 1 (750GB ENV)
 
 #define	HEAD_RESERVED_BLOCKS (unsigned long)63 + ((unsigned long)(FACT_TABLE_INDEX_MAX+1)*64)/4096
 
