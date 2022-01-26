@@ -1,13 +1,33 @@
-# Hishine6 Exclusive   
-- modified files(fs/nova): super.c, nova_def.h, super.h, file.c, log.c, log.h, dax.c, balloc.c  
-- DFLAG  
-0: Valid  
-1: Need Process  
-2: Processing  
+# 1. DeNOVA: Deduplication Extended NOVA File System
+
+### Description
+DeNova offers high-performance and low-latency I/O processing and executes 
+deduplication in the background (offline deduplication) without interfering 
+with foreground I/Os. Furthermore, it employs a DRAM-free persistent 
+deduplication metadata, favoring CPU cache-line, and ensures failure consistency
+on any system failure. 
+
+We have used the baseline NOVA FS to implement such an offline deduplication 
+system. The additional features include ...
+- DD (Deduplication Daemon): A background thread that performs offline deduplication. 
+- FACT (Failure Atomic Consistent Table): A DRAM-free persistent deduplication metadata table.
+- DWQ (Deduplication Work Queue): A kernel queue to determine the candidates for deduplication.
+
+More specific information can be found in the following paper:
+(TBD)
+
+### Working In Progress(TODOs)
+- We have found minor bugs during the reordering process. It has been detached for debugging.
+- The recovery process has not been fully implemented.
+- Currently the DD is triggered manually for debugging convenience.
+- In order to improve the performance of overwrite, a new delete process is being employed.
+
+### Building DeNOVA
+Refer to [Building and Using NOVA](##building-and-using-nova)
 
 
 
-# NOVA: NOn-Volatile memory Accelerated log-structured file system
+# 2. NOVA: NOn-Volatile memory Accelerated log-structured file system
 
 ### Linux versions supported
 5.1 (current master), 5.0, 4.19, 4.18, 4.14, 4.13. Checkout each branch if you are interested.
