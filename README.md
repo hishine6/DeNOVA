@@ -14,13 +14,16 @@ system. The additional features include ...
 - DWQ (Deduplication Work Queue): A kernel queue to determine the candidates for deduplication.
 
 More specific information can be found in the following paper:
-(IPDPS22-will be updated)
+
+DeNOVA: Deduplication Extended NOVA File System [PDF](https://discos.sogang.ac.kr/file/2022/intl_conf/IPDPS_2022_J_Kwon.pdf)<br>
+Hyungjoon Kwon, Yonghyeon Cho, Awais Khan, Yeohyeon Park, Youngjae Kim
+(To Appear) in IPDPS 2022
+
 
 ### Working In Progress(TODOs)
 - We have found minor bugs during the reordering process. It has been detached for debugging.
 - The recovery process has not been fully implemented.
 - Currently the DD is triggered manually for debugging convenience.
-- In order to improve the performance of overwrite, a new delete process is being employed.
 
 ### Building DeNOVA
 To build DeNOVA refer to [Building and Using NOVA](##building-and-using-nova) in below. Before building the kernel image, it might need minor configuration. The size of the FACT is determined by the capacity of NVM. Currently, FACT is a static table. The size of the FACT should be modified accordingly to the NVM capacity. The modifications can be done in 'fs/nova/super.h'. Furthermore, the current version includes empty cycles during the read/write path to emulate the latency of NVM devices. This should be deleted when using an actual NVM device.
