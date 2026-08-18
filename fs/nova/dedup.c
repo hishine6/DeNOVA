@@ -324,123 +324,91 @@ int nova_dedup_FACT_recovery(struct super_block *sb){
 }
 
 int nova_dedup_FACT_reorder(struct super_block *sb, u64 head_index){
-	struct fact_entry* target_entry;
-	u64 curr_index = head_index;
+	struct fact_entry *te;
 	u64 target_index;
-	u64 last_index=0;
-	unsigned long *weight;
-	unsigned long *reorder;
-	unsigned long irq_flags=0;
-	unsigned long tmp1;
-	unsigned long tmp2;	/* holds a FACT entry index; int would truncate */
-	int i,j,hops=0;
+	u64 *idx, *wt;			/* IAA (non-head) node indices and weights */
+	u64 curr;
+	unsigned long irq_flags = 0;
+	unsigned long tmpw;
+	u64 tmpi;
+	int i, j, n = 0;
 
-	printk("Reorder Start\n");
+	/*
+	 * Reorder bucket head_index's hash-collision chain by reference count so
+	 * hotter entries are found first. The head lives at the fixed direct-area
+	 * slot head_index and is always examined first by a lookup, so it stays
+	 * the anchor -- only the IAA (indirect) nodes are permuted. Chain shape:
+	 *   head -> n_1 -> ... -> n_m -> head   (next is circular back to head;
+	 *   head->prev is 0 by convention).
+	 * The original code sorted the head into the array too, which ended up
+	 * writing head->next = head (a self-loop) and detached the chain.
+	 */
 
-	// Count hops & save nodes of a linked list to reorder
-	do{
-		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + curr_index * NOVA_FACT_ENTRY_SIZE;
-		target_entry = (struct fact_entry *)nova_get_block(sb,target_index);
-		hops++; 
-		curr_index = target_entry->next;
-	}while(target_entry->next != head_index);
+	/* 1. Count IAA nodes reachable from head->next (until back to head). */
+	target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + head_index * NOVA_FACT_ENTRY_SIZE;
+	te = (struct fact_entry *)nova_get_block(sb, target_index);
+	curr = te->next;
+	while (curr != head_index && curr != 0) {
+		n++;
+		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + curr * NOVA_FACT_ENTRY_SIZE;
+		te = (struct fact_entry *)nova_get_block(sb, target_index);
+		curr = te->next;
+	}
+	if (n < 2)
+		return 0;		/* 0 or 1 IAA nodes: nothing to reorder */
 
+	idx = kmalloc(n * sizeof(u64), GFP_KERNEL);
+	wt  = kmalloc(n * sizeof(u64), GFP_KERNEL);
+	if (!idx || !wt) { kfree(idx); kfree(wt); return -ENOMEM; }
 
-	weight = kmalloc(hops * sizeof(unsigned long),GFP_KERNEL);
-	reorder = kmalloc(hops * sizeof(unsigned long),GFP_KERNEL);
-
-	curr_index = head_index;
-	for(i=0;i<hops;i++){
-		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + curr_index * NOVA_FACT_ENTRY_SIZE;
-		target_entry = (struct fact_entry *) nova_get_block(sb, target_index);
-
-		weight[i] = target_entry->count>>32;
-		reorder[i] = curr_index;	/* entry index (used later as reorder[i]*ENTRY_SIZE), not the byte offset */
-
-		curr_index = target_entry->next;
+	/* 2. Snapshot IAA node indices and weights (reference count = count>>32). */
+	target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + head_index * NOVA_FACT_ENTRY_SIZE;
+	te = (struct fact_entry *)nova_get_block(sb, target_index);
+	curr = te->next;
+	for (i = 0; i < n; i++) {
+		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + curr * NOVA_FACT_ENTRY_SIZE;
+		te = (struct fact_entry *)nova_get_block(sb, target_index);
+		idx[i] = curr;
+		wt[i]  = te->count >> 32;
+		curr = te->next;
 	}
 
-	// Sort the linked list
-	for(i=0;i<hops-1;i++){
-		for(j=0;j<hops-i-1;j++){
-			if(weight[j] > weight[j+1]){
-				tmp1=weight[j];
-				tmp2=reorder[j];
-
-				weight[j] = weight[j+1];
-				reorder[j] = reorder[j+1];	/* was weight[j+1] -- corrupted the index array */
-
-				weight[j+1] = tmp1;
-				reorder[j+1] = tmp2;
+	/* 3. Sort indices by weight, descending (bubble sort; chains are short). */
+	for (i = 0; i < n - 1; i++)
+		for (j = 0; j < n - 1 - i; j++)
+			if (wt[j] < wt[j + 1]) {
+				tmpw = wt[j];  wt[j]  = wt[j + 1];  wt[j + 1]  = tmpw;
+				tmpi = idx[j]; idx[j] = idx[j + 1]; idx[j + 1] = tmpi;
 			}
-		}
+
+	/* 4. Rewrite links: head -> idx[0] -> ... -> idx[n-1] -> head. head keeps
+	 *    prev = 0; each IAA node gets prev/next from its new neighbours (prev
+	 *    and next share the 64-byte entry's cacheline, one flush covers both). */
+	for (i = 0; i < n; i++) {
+		u64 p  = (i == 0)     ? head_index : idx[i - 1];
+		u64 nx = (i == n - 1) ? head_index : idx[i + 1];
+
+		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + idx[i] * NOVA_FACT_ENTRY_SIZE;
+		te = (struct fact_entry *)nova_get_block(sb, target_index);
+		nova_memunlock_range(sb, te, NOVA_FACT_ENTRY_SIZE, &irq_flags);
+		te->prev = p;
+		te->next = nx;
+		nova_flush_buffer(&te->prev, CACHELINE_SIZE, 0);
+		nova_memlock_range(sb, te, NOVA_FACT_ENTRY_SIZE, &irq_flags);
 	}
 
-	// head 'prev' to head_index
+	/* head->next = idx[0] (head->prev stays 0). Published last. */
 	target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + head_index * NOVA_FACT_ENTRY_SIZE;
-	target_entry = (struct fact_entry *)nova_get_block(sb,target_index);
-
-	nova_memunlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+	te = (struct fact_entry *)nova_get_block(sb, target_index);
+	nova_memunlock_range(sb, te, NOVA_FACT_ENTRY_SIZE, &irq_flags);
 	PERSISTENT_BARRIER();
-	target_entry->prev = head_index;
-	nova_flush_buffer(&target_entry->prev,CACHELINE_SIZE,1);
-	nova_memlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+	te->next = idx[0];
+	nova_flush_buffer(&te->next, CACHELINE_SIZE, 1);
+	nova_memlock_range(sb, te, NOVA_FACT_ENTRY_SIZE, &irq_flags);
 
-	// Modify the prev of all nodes
-
-	for(i=0;i<hops;i++){
-		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + reorder[i]*NOVA_FACT_ENTRY_SIZE;
-		target_entry = (struct fact_entry *) nova_get_block(sb, target_index);
-
-		if(i==0)
-			target_entry->prev = head_index;
-		else
-			target_entry->prev = reorder[i-1];
-	}
-
-
-	// head 'prev' to last node
-	target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + head_index * NOVA_FACT_ENTRY_SIZE;
-	target_entry = (struct fact_entry *)nova_get_block(sb,target_index);
-
-	nova_memunlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
-	PERSISTENT_BARRIER();
-	target_entry->prev = last_index;
-	nova_flush_buffer(&target_entry->prev,CACHELINE_SIZE,1);
-	nova_memlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
-
-	// Modify the next of all nodes
-	target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + head_index*NOVA_FACT_ENTRY_SIZE;
-	target_entry = (struct fact_entry*) nova_get_block(sb, target_index);
-	target_entry->next = reorder[0];
-
-	for(i=0;i<hops;i++){
-		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + reorder[i]*NOVA_FACT_ENTRY_SIZE;
-		target_entry = (struct fact_entry *) nova_get_block(sb, target_index);
-
-		if(i==hops-1)
-			target_entry->next = head_index;
-		else
-			target_entry->next = reorder[i+1];
-	}
-
-
-	// head 'prev' to 0
-	target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + head_index * NOVA_FACT_ENTRY_SIZE;
-	target_entry = (struct fact_entry *)nova_get_block(sb,target_index);
-
-	nova_memunlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
-	PERSISTENT_BARRIER();
-	target_entry->prev = 0;
-	nova_flush_buffer(&target_entry->prev,CACHELINE_SIZE,1);
-	nova_memlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE,&irq_flags);
-
-	kfree(weight);
-	kfree(reorder);
-
-	printk("Reorder End\n");
-
-	return 1;
+	kfree(idx);
+	kfree(wt);
+	return 0;
 }
 
 // Check FACT index range(of FACT)
@@ -681,7 +649,11 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 		nova_memlock_range(sb,pmem_te, NOVA_FACT_ENTRY_SIZE,&irq_flags);
 	}
 
-	//nova_dedup_FACT_reorder(sb,head_index);
+	// Reorder this bucket's collision chain by reference count once the chain
+	// grows past REORDER_THRESHOLD, so hot entries are found first on lookup.
+	// (hop is the chain length traversed by the lookup above.)
+	if(hop > REORDER_THRESHOLD)
+		nova_dedup_FACT_reorder(sb,head_index);
 
 	return ret;
 }
