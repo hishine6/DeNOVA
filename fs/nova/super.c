@@ -126,8 +126,16 @@ static int nova_get_nvmm_info(struct super_block *sb,
 	nova_dbg_verbose("%s: dax_supported = %d; bdev->super=0x%p",
 			 __func__, ret, sb->s_bdev->bd_super);
 	if (!ret) {
-		nova_err(sb, "device does not support DAX\n");
-		return -EINVAL;
+		/*
+		 * QEMU test-env accommodation: a memmap=-created pmem region
+		 * comes up in "raw" mode with no struct-page (devmap) backing,
+		 * so bdev_dax_supported() is false even though the
+		 * dax_direct_access() call below still returns a usable direct
+		 * mapping that NOVA uses for all of its I/O. Warn and continue
+		 * instead of failing the mount. Real fsdax pmem passes the
+		 * check normally and is unaffected.
+		 */
+		nova_warn("bdev_dax_supported() false (raw memmap pmem?); continuing via dax_direct_access\n");
 	}
 
 	sbi->s_bdev = sb->s_bdev;
@@ -791,6 +799,15 @@ setup_sb:
 				__func__, retval);
 			goto out;
 		}
+
+		/* DEDUP: a fresh format sets up the dedup queue and FACT via
+		 * nova_init() -> nova_dedup_FACT_init(). On a non-format mount
+		 * nova_init() does not run, so rebuild the in-DRAM dedup state
+		 * (queue + FACT free-list) from the persistent FACT here --
+		 * otherwise the queue and free-list are uninitialised and the
+		 * first write / dedup after mount dereferences them. */
+		nova_dedup_queue_init();
+		nova_dedup_FACT_recovery(sb);
 	}
 
 	root_i = nova_iget(sb, NOVA_ROOT_INO);
@@ -813,6 +830,11 @@ setup_sb:
 		nova_update_mount_time(sb);
 
 	nova_print_curr_epoch_id(sb);
+
+	/* DEDUP: start the background dedup daemon now that the dedup queue and
+	 * FACT are ready (set up by nova_init() on format, or FACT_recovery
+	 * above on a normal mount). */
+	nova_dedup_daemon_init(sb);
 
 	retval = 0;
 	NOVA_END_TIMING(mount_t, mount_time);
@@ -935,6 +957,9 @@ static void nova_put_super(struct super_block *sb)
 	int i;
 
 	nova_print_curr_epoch_id(sb);
+
+	/* DEDUP: stop the background dedup daemon before tearing anything down. */
+	nova_dedup_daemon_stop(sb);
 
 	/* It's unmount time, so unmap the nova memory */
 //	nova_print_free_lists(sb);

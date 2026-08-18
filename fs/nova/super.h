@@ -181,6 +181,9 @@ struct nova_sb_info {
 
 	struct task_struct *snapshot_cleaner_thread;
 	wait_queue_head_t snapshot_cleaner_wait;
+
+	/* DEDUP: background dedup daemon (DD) that drains the dedup queue */
+	struct task_struct *dedup_thread;
 	wait_queue_head_t snapshot_mmap_wait;
 	void *curr_clean_snapshot_info;
 
