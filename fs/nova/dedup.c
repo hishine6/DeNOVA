@@ -575,7 +575,7 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + index * NOVA_FACT_ENTRY_SIZE;
 		pmem_te = (struct fact_entry*)nova_get_block(sb,target_index);
 
-		__copy_to_user(&te,pmem_te,sizeof(struct fact_entry));  
+		memcpy(&te, pmem_te, sizeof(struct fact_entry));  
 		nova_dedup_read_emulate(sizeof(struct fact_entry));
 		//printk("head index:%llu prev-index:%llu index:%llu next-index:%llu\n",head_index,te.prev,index,te.next);
 
@@ -614,7 +614,7 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + index * NOVA_FACT_ENTRY_SIZE;
 		pmem_te = (struct fact_entry*)nova_get_block(sb,target_index);
 
-		__copy_to_user(&te,pmem_te,sizeof(struct fact_entry));  
+		memcpy(&te, pmem_te, sizeof(struct fact_entry));  
 		nova_dedup_read_emulate(sizeof(struct fact_entry));
 
 		nova_dedup_copy_fingerprint(lookup->fingerprint,te.fingerprint);	
@@ -977,7 +977,7 @@ int nova_dedup_test(struct file * filp){
 				dax_mem = nova_get_block(sb,(nvmm << PAGE_SHIFT));
 
 
-				left = __copy_to_user(buf,dax_mem,DATABLOCK_SIZE); // Read data page
+				left = memcpy_mcsafe(buf,dax_mem,DATABLOCK_SIZE); // Read data page (pmem, MCE-safe)
 				nova_dedup_read_emulate(DATABLOCK_SIZE);
 
 				if(left){
