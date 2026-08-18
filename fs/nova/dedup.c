@@ -6,14 +6,70 @@
 struct DeNOVA_bm *FACT_free_list; // For allocating new  indirect access area
 
 /*
- * Serializes every FACT-entry modification (insert / reference-count update /
- * reorder / is_duplicate) so the background dedup daemon and concurrent block
- * frees cannot race on the non-atomic count RMW or the chain links (which
- * otherwise corrupts reference counts -> premature/double free). This is a
- * leaf lock: no other lock is acquired while it is held (it is always taken
- * inside the inode lock), so it cannot deadlock with the inode/sb/journal locks.
+ * FACT modification locking (opt #2): a bucket-sharded array of leaf mutexes
+ * instead of one global lock. Every FACT-entry modification (insert /
+ * reference-count update / reorder / is_duplicate) is serialized against
+ * others *on the same collision chain*, but different chains proceed in
+ * parallel, so the background dedup daemon and concurrent block frees no longer
+ * serialize globally on the (non-atomic) count RMW and chain links.
+ *
+ * The shard key is the chain's head bucket = hash(fingerprint). This is well
+ * defined for any entry because every member of a collision chain hashed to
+ * the same head bucket, and the fingerprint is stored in the entry -- so an
+ * operation reached via delete_entry indirection can recover its chain's lock
+ * (see nova_fact_indirect_lock). Holding an entry's bucket lock pins it: the
+ * entry cannot be freed or its slot repurposed to another chain without that
+ * same lock, since is_duplicate's free path also takes hash(fingerprint).
+ *
+ * These are leaf locks: exactly one is held at a time (reorder/free touch only
+ * same-chain entries, which share the bucket), always inside the inode lock, so
+ * no deadlock with inode/sb/journal locks and no lock-ordering among shards.
  */
-static DEFINE_MUTEX(nova_fact_lock);
+#define NOVA_FACT_HASH_LOCKS 1024		/* power of two */
+static struct mutex nova_fact_locks[NOVA_FACT_HASH_LOCKS];
+static bool nova_fact_locks_ready;
+
+/* Idempotent; called from nova_dedup_queue_init() on every mount. Mount is
+ * single-threaded, so the ready flag needs no additional serialization. */
+static void nova_fact_locks_init(void)
+{
+	int i;
+
+	if (nova_fact_locks_ready)
+		return;
+	for (i = 0; i < NOVA_FACT_HASH_LOCKS; i++)
+		mutex_init(&nova_fact_locks[i]);
+	nova_fact_locks_ready = true;
+}
+
+/* Head bucket (direct hash slot) of a fingerprint -- MUST match the index
+ * computation in nova_dedup_FACT_insert() exactly. */
+static u64 nova_dedup_fact_bucket(const unsigned char *fp)
+{
+	u64 index = 0;
+
+	if (FACT_TABLE_INDEX_MAX == 1048575) {
+		index = fp[0]; index = index << 8 | fp[1];
+		index = index << 3 | ((fp[2] & 224) >> 5);
+	} else if (FACT_TABLE_INDEX_MAX == 16777215) {
+		index = fp[0]; index = index << 8 | fp[1];
+		index = index << 6 | ((fp[2] & 252) >> 2);
+	} else if (FACT_TABLE_INDEX_MAX == 33554431) {
+		index = fp[0]; index = index << 8 | fp[1];
+		index = index << 7 | ((fp[2] & 254) >> 1);
+	} else if (FACT_TABLE_INDEX_MAX == 196607999 ||
+		   FACT_TABLE_INDEX_MAX == 268435455) {
+		index = fp[0]; index = index << 8 | fp[1];
+		index = index << 8 | fp[2];
+		index = index << 3 | ((fp[3] & 224) >> 5);
+	}
+	return index;
+}
+
+static struct mutex *nova_fact_bucket_lock(u64 head_index)
+{
+	return &nova_fact_locks[head_index & (NOVA_FACT_HASH_LOCKS - 1)];
+}
 
 /******** EMULATE **************/
 void nova_dedup_read_emulate(unsigned long size){
@@ -38,6 +94,7 @@ int nova_dedup_queue_init(void){
 	INIT_LIST_HEAD(&dqueue.head.list);
 	mutex_init(&dqueue.lock);
 	dqueue.head.write_entry_address = 0;
+	nova_fact_locks_init();		/* opt #2: FACT bucket-lock array */
 	return 0;
 }
 
@@ -547,14 +604,61 @@ int nova_dedup_FACT_index_head(u64 index){
 		return 1;
 }
 
-// Update Count after tail has been updated. 
+/*
+ * Bucket lock for a chain reached by delete_entry indirection. `key` is a
+ * data-block FACT slot; its delete_entry points at the canonical dedup entry,
+ * whose fingerprint names the chain. Falls back to bucket 0 when the linkage is
+ * not (yet) valid -- the _locked callee re-reads delete_entry and no-ops on an
+ * out-of-range index, so an unrelated bucket-0 hold is harmless there.
+ */
+static struct mutex *nova_fact_indirect_bucket(struct super_block *sb, u64 key)
+{
+	struct fact_entry *e;
+	u64 t;
+
+	if (nova_dedup_FACT_index_check(key))
+		return &nova_fact_locks[0];
+	e = (struct fact_entry *)nova_get_block(sb,
+		NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + key * NOVA_FACT_ENTRY_SIZE);
+	t = e->delete_entry;
+	if (nova_dedup_FACT_index_check(t))
+		return &nova_fact_locks[0];
+	e = (struct fact_entry *)nova_get_block(sb,
+		NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + t * NOVA_FACT_ENTRY_SIZE);
+	return nova_fact_bucket_lock(nova_dedup_fact_bucket(e->fingerprint));
+}
+
+/*
+ * Acquire the bucket lock for a delete_entry-indirection key, retrying until
+ * the held lock still matches the key's chain. A concurrent daemon insert can
+ * flip delete_entry from unset to set between peek and lock; the recheck lands
+ * us on the right shard. Once held, the target entry is pinned: it cannot be
+ * freed or repointed without this same lock. Returns the held lock; caller
+ * mutex_unlock()s it after the _locked call.
+ */
+static struct mutex *nova_fact_lock_indirect(struct super_block *sb, u64 key)
+{
+	struct mutex *l;
+
+	for (;;) {
+		l = nova_fact_indirect_bucket(sb, key);
+		mutex_lock(l);
+		if (l == nova_fact_indirect_bucket(sb, key))
+			return l;
+		mutex_unlock(l);
+	}
+}
+
+// Update Count after tail has been updated.
 static int nova_dedup_FACT_update_count_locked(struct super_block *sb, u64 index);
 int nova_dedup_FACT_update_count(struct super_block *sb, u64 index)
 {
+	struct mutex *l;
 	int ret;
-	mutex_lock(&nova_fact_lock);
+
+	l = nova_fact_lock_indirect(sb, index);
 	ret = nova_dedup_FACT_update_count_locked(sb, index);
-	mutex_unlock(&nova_fact_lock);
+	mutex_unlock(l);
 	return ret;
 }
 static int nova_dedup_FACT_update_count_locked(struct super_block *sb, u64 index){
@@ -624,10 +728,15 @@ int nova_dedup_FACT_read(struct super_block *sb, u64 index){
 static int nova_dedup_FACT_insert_locked(struct super_block *sb, struct fingerprint_lookup_data* lookup);
 int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_data* lookup)
 {
+	struct mutex *l;
 	int ret;
-	mutex_lock(&nova_fact_lock);
+
+	/* Chain bucket is known from the lookup fingerprint; insert (and the
+	 * reorder it may call) touch only this chain + the free-list. */
+	l = nova_fact_bucket_lock(nova_dedup_fact_bucket(lookup->fingerprint));
+	mutex_lock(l);
 	ret = nova_dedup_FACT_insert_locked(sb, lookup);
-	mutex_unlock(&nova_fact_lock);
+	mutex_unlock(l);
 	return ret;
 }
 static int nova_dedup_FACT_insert_locked(struct super_block *sb, struct fingerprint_lookup_data* lookup){
@@ -880,10 +989,12 @@ int nova_dedup_entry_update(struct super_block *sb, struct nova_inode_info_heade
 static int nova_dedup_is_duplicate_locked(struct super_block *sb, unsigned long blocknr, bool check);
 int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool check)
 {
+	struct mutex *l;
 	int ret;
-	mutex_lock(&nova_fact_lock);
+
+	l = nova_fact_lock_indirect(sb, blocknr);
 	ret = nova_dedup_is_duplicate_locked(sb, blocknr, check);
-	mutex_unlock(&nova_fact_lock);
+	mutex_unlock(l);
 	return ret;
 }
 static int nova_dedup_is_duplicate_locked(struct super_block *sb, unsigned long blocknr, bool check){
