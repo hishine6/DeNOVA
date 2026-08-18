@@ -579,7 +579,19 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 		nova_dedup_read_emulate(sizeof(struct fact_entry));
 		//printk("head index:%llu prev-index:%llu index:%llu next-index:%llu\n",head_index,te.prev,index,te.next);
 
-		if(nova_dedup_compare_fingerprint(te.fingerprint, lookup->fingerprint)==0 && (te.count != 0)){ // duplicate found
+		/*
+		 * A fingerprint (SHA-1) match alone is not proof the blocks are
+		 * identical: a hash collision would silently merge two different
+		 * blocks and corrupt data. Require a byte-for-byte match of the
+		 * candidate block against the stored (canonical) block before
+		 * treating it as a duplicate. On collision the condition is false,
+		 * so the chain search continues and a genuine match elsewhere in
+		 * the chain (or a fresh entry) is still handled correctly.
+		 */
+		if(nova_dedup_compare_fingerprint(te.fingerprint, lookup->fingerprint)==0 && (te.count != 0)
+			&& memcmp(nova_get_block(sb, lookup->block_address << PAGE_SHIFT),
+				  nova_get_block(sb, te.block_address << PAGE_SHIFT),
+				  DATABLOCK_SIZE) == 0){ // duplicate found (fingerprint + bytes)
 			ret = 1;
 			break;
 		}
