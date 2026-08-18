@@ -3,7 +3,17 @@
 #include "dedup.h"
 
 /******************** FACT DRAM data structure *****************/
-struct DeNOVA_bm *FACT_free_list; // For allocating new  indirect access area 
+struct DeNOVA_bm *FACT_free_list; // For allocating new  indirect access area
+
+/*
+ * Serializes every FACT-entry modification (insert / reference-count update /
+ * reorder / is_duplicate) so the background dedup daemon and concurrent block
+ * frees cannot race on the non-atomic count RMW or the chain links (which
+ * otherwise corrupts reference counts -> premature/double free). This is a
+ * leaf lock: no other lock is acquired while it is held (it is always taken
+ * inside the inode lock), so it cannot deadlock with the inode/sb/journal locks.
+ */
+static DEFINE_MUTEX(nova_fact_lock);
 
 /******** EMULATE **************/
 void nova_dedup_read_emulate(unsigned long size){
@@ -443,7 +453,16 @@ int nova_dedup_FACT_index_head(u64 index){
 }
 
 // Update Count after tail has been updated. 
-int nova_dedup_FACT_update_count(struct super_block *sb, u64 index){
+static int nova_dedup_FACT_update_count_locked(struct super_block *sb, u64 index);
+int nova_dedup_FACT_update_count(struct super_block *sb, u64 index)
+{
+	int ret;
+	mutex_lock(&nova_fact_lock);
+	ret = nova_dedup_FACT_update_count_locked(sb, index);
+	mutex_unlock(&nova_fact_lock);
+	return ret;
+}
+static int nova_dedup_FACT_update_count_locked(struct super_block *sb, u64 index){
 	u64 count = 0;
 	u64 compare = ((unsigned long)1<<32)-1;
 	struct fact_entry* target_entry;
@@ -507,7 +526,16 @@ int nova_dedup_FACT_read(struct super_block *sb, u64 index){
 	return 0;
 }
 
-int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_data* lookup){
+static int nova_dedup_FACT_insert_locked(struct super_block *sb, struct fingerprint_lookup_data* lookup);
+int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_data* lookup)
+{
+	int ret;
+	mutex_lock(&nova_fact_lock);
+	ret = nova_dedup_FACT_insert_locked(sb, lookup);
+	mutex_unlock(&nova_fact_lock);
+	return ret;
+}
+static int nova_dedup_FACT_insert_locked(struct super_block *sb, struct fingerprint_lookup_data* lookup){
 	unsigned long irq_flags=0;
 	struct fact_entry  te; // target entry
 	struct fact_entry* pmem_te; // pmem target entry
@@ -754,7 +782,16 @@ int nova_dedup_entry_update(struct super_block *sb, struct nova_inode_info_heade
 // Return 1 if it's okay to delete - reference count = 0
 // Return 0 if it's not okay to delete - reference count > 0
 // Return 2 if it's not in FACT table - reference count < 0
-int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool check){
+static int nova_dedup_is_duplicate_locked(struct super_block *sb, unsigned long blocknr, bool check);
+int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool check)
+{
+	int ret;
+	mutex_lock(&nova_fact_lock);
+	ret = nova_dedup_is_duplicate_locked(sb, blocknr, check);
+	mutex_unlock(&nova_fact_lock);
+	return ret;
+}
+static int nova_dedup_is_duplicate_locked(struct super_block *sb, unsigned long blocknr, bool check){
 	unsigned long irq_flags=0;
 	struct fact_entry* pmem_te; // pmem target entry
 	struct fact_entry* delete_te;
