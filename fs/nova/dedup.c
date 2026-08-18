@@ -547,8 +547,14 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 		index = index << 8 | lookup->fingerprint[1];
 		index = index << 6 | ((lookup->fingerprint[2] & 252)>>2);
 	}
+	/* 64GB Environment (2^25-1) - 23 bit direct hash; IAA starts at 2^23 */
+	else if(FACT_TABLE_INDEX_MAX == 33554431){
+		index = lookup->fingerprint[0];
+		index = index << 8 | lookup->fingerprint[1];
+		index = index << 7 | ((lookup->fingerprint[2] & 254)>>1);
+	}
 	/* 1TB, 750GB Environment - 27 bit */
-	else if(FACT_TABLE_INDEX_MAX == 196607999 || FACT_TABLE_INDEX_MAX == 268435455){    
+	else if(FACT_TABLE_INDEX_MAX == 196607999 || FACT_TABLE_INDEX_MAX == 268435455){
 		index = lookup->fingerprint[0];
 		index = index << 8 | lookup->fingerprint[1];
 		index = index << 8 | lookup->fingerprint[2];
