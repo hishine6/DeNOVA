@@ -816,8 +816,8 @@ int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool 
 			nova_memunlock_range(sb,delete_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
 			PERSISTENT_BARRIER();
 			delete_te->delete_entry=0;
-			nova_flush_buffer(&pmem_te->prev,CACHELINE_SIZE,1);
-			nova_memlock_range(sb,pmem_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
+			nova_flush_buffer(&delete_te->delete_entry,CACHELINE_SIZE,1);
+			nova_memlock_range(sb,delete_te,NOVA_FACT_ENTRY_SIZE,&irq_flags);
 
 			// Set bit to 0 in deleted FACT entry
 			clear_bit(index,FACT_free_list->bitmap);// clear the bit of index
