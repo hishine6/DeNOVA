@@ -44,6 +44,27 @@ Test size is tunable at initramfs-build time:
 NBLOCKS=40000 NDISTINCT=128 bash scripts/build_initramfs.sh
 ```
 
+### Selecting the dedup fingerprint hash
+
+The content-fingerprint hash is a build-time `choice` (`fs/nova/Kconfig`).
+`build_kernel.sh` exposes it via `HASH=`:
+
+```sh
+HASH=xxhash bash scripts/build_kernel.sh   # default: whole-block avalanche, fast
+HASH=crc32c bash scripts/build_kernel.sh   # hardware CRC32C, weaker distribution
+HASH=sha1   bash scripts/build_kernel.sh   # original DeNOVA (cryptographic, slow)
+```
+
+A collision never corrupts data (FACT_insert byte-verifies the two blocks
+before merging), so a fast non-cryptographic hash is safe. Timing the dedup
+pass over 20000 distinct 4 KB blocks (TCG, daemon off) gives roughly:
+
+| hash   | dedup pass | throughput | vs SHA-1 |
+|--------|-----------:|-----------:|---------:|
+| sha1   |     1.32 s |  59.2 MB/s |     1.0x |
+| crc32c |     0.35 s | 223.2 MB/s |     3.8x |
+| xxhash |     0.30 s | 260.4 MB/s |     4.4x |
+
 ## What the default (harsh) test does
 
 `build_initramfs.sh` builds a comprehensive stress test that prints

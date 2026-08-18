@@ -167,6 +167,90 @@ int nova_dedup_copy_fingerprint(unsigned char*src, unsigned char *dst){
 	return 0;
 }
 
+/*
+ * Content-fingerprint hasher (build-time selectable, see fs/nova/Kconfig).
+ *
+ * A fingerprint collision is never a correctness problem: FACT_insert
+ * byte-compares the two candidate blocks before merging them, so a fast
+ * non-cryptographic hash is safe here. The choice below trades speed against
+ * collision-distribution quality. nova_dedup_core() opens a hasher for the
+ * duration of one dedup pass (init/fini) and calls nova_dedup_hash() per block;
+ * hashing is serialized by nova_dedup_run_lock, so no per-hasher locking.
+ */
+struct nova_dedup_hasher {
+#if defined(CONFIG_NOVA_DEDUP_HASH_SHA1)
+	struct crypto_shash *tfm;
+#endif
+};
+
+#if defined(CONFIG_NOVA_DEDUP_HASH_SHA1)
+/* SHA-1: 160-bit cryptographic hash (original DeNOVA behavior). */
+static int nova_dedup_hasher_init(struct nova_dedup_hasher *h)
+{
+	h->tfm = crypto_alloc_shash("sha1", 0, 0);
+	if (IS_ERR(h->tfm)) {
+		int err = PTR_ERR(h->tfm);
+
+		h->tfm = NULL;
+		pr_err("nova: dedup SHA-1 alloc failed (%d)\n", err);
+		return err;
+	}
+	return 0;
+}
+static int nova_dedup_hash(struct nova_dedup_hasher *h,
+		const unsigned char *buf, unsigned char *fp)
+{
+	SHASH_DESC_ON_STACK(desc, h->tfm);
+
+	desc->tfm = h->tfm;
+	desc->flags = 0;
+	return crypto_shash_digest(desc, buf, DATABLOCK_SIZE, fp);
+}
+static void nova_dedup_hasher_fini(struct nova_dedup_hasher *h)
+{
+	if (h->tfm)
+		crypto_free_shash(h->tfm);
+}
+
+#elif defined(CONFIG_NOVA_DEDUP_HASH_CRC32C)
+/* CRC32C: 128 bits, one hardware CRC32C word per 1KB quarter. */
+#include <linux/crc32c.h>
+static int nova_dedup_hasher_init(struct nova_dedup_hasher *h) { return 0; }
+static int nova_dedup_hash(struct nova_dedup_hasher *h,
+		const unsigned char *buf, unsigned char *fp)
+{
+	u32 c;
+	int k;
+
+	memset(fp, 0, FINGERPRINT_SIZE);
+	for (k = 0; k < 4; k++) {
+		c = crc32c(~0U, buf + k * 1024, 1024);
+		memcpy(fp + k * 4, &c, sizeof(c));
+	}
+	return 0;
+}
+static void nova_dedup_hasher_fini(struct nova_dedup_hasher *h) {}
+
+#else /* CONFIG_NOVA_DEDUP_HASH_XXHASH (default) */
+/* xxhash: 128 bits from two whole-block xxh64 passes (whole-block avalanche:
+ * any 1-byte change scrambles all 128 bits, no single-region weakness, no
+ * bucket clustering on shared prefixes). */
+#include <linux/xxhash.h>
+static int nova_dedup_hasher_init(struct nova_dedup_hasher *h) { return 0; }
+static int nova_dedup_hash(struct nova_dedup_hasher *h,
+		const unsigned char *buf, unsigned char *fp)
+{
+	u64 h0 = xxh64(buf, DATABLOCK_SIZE, 0);
+	u64 h1 = xxh64(buf, DATABLOCK_SIZE, 0x9E3779B185EBCA87ULL);
+
+	memset(fp, 0, FINGERPRINT_SIZE);
+	memcpy(fp, &h0, sizeof(h0));
+	memcpy(fp + 8, &h1, sizeof(h1));
+	return 0;
+}
+static void nova_dedup_hasher_fini(struct nova_dedup_hasher *h) {}
+#endif
+
 /******************** Check Integrity of Inode, Write Entry, Data page ********************/
 // Cross check if 'Inode', 'WriteEntry', 'Datapage' was invalidated
 // Return 1 if Inode-writeentry-datapage is all valid
@@ -896,21 +980,8 @@ static int nova_dedup_is_duplicate_locked(struct super_block *sb, unsigned long 
 static int nova_dedup_core(struct super_block *sb){
 	// How many deduplications are going to be done each time?
 	int dedup_loop_count = 20000; // this is 'n'
+	struct nova_dedup_hasher hasher; // per-pass content-fingerprint hasher
 
-	// SHA1
-	struct sdesc *sdesc;
-	struct crypto_shash *alg;
-	char *hash_alg_name = "sha1";
-	alg = crypto_alloc_shash(hash_alg_name,0,0);
-	if(IS_ERR(alg)){
-		pr_info("can't alloc alg %s\n",hash_alg_name);
-		return PTR_ERR(alg);
-	}		
-	sdesc = init_sdesc(alg);
-	if (IS_ERR(sdesc)) {
-		pr_info("can't alloc sdesc\n");
-		return PTR_ERR(sdesc);
-	}
 	INIT_TIMING(t0);
 	INIT_TIMING(t1);
 
@@ -953,6 +1024,16 @@ static int nova_dedup_core(struct super_block *sb){
 	// kmalloc buf, fingerprint
 	buf = kmalloc(DATABLOCK_SIZE,GFP_KERNEL);
 	fingerprint = kmalloc(FINGERPRINT_SIZE,GFP_KERNEL);
+	if (!buf || !fingerprint) {
+		kfree(buf);
+		kfree(fingerprint);
+		return -ENOMEM;
+	}
+	if (nova_dedup_hasher_init(&hasher)) {
+		kfree(buf);
+		kfree(fingerprint);
+		return -EINVAL;
+	}
 
 	do{
 		// Pop TWE(Target Write Entry)
@@ -1037,7 +1118,7 @@ static int nova_dedup_core(struct super_block *sb){
 					nova_dbg("%s ERROR!: left %lu\n",__func__,left);
 					goto out;
 				}
-				crypto_shash_digest(&sdesc->shash,buf, DATABLOCK_SIZE,fingerprint);
+				nova_dedup_hash(&hasher, buf, fingerprint);
 
 				for(j=0;j<FINGERPRINT_SIZE;j++){
 					lookup_data[i].fingerprint[j] = fingerprint[j];
@@ -1164,9 +1245,8 @@ out2:
 	}while(dedup_loop_count--);
 
 	//nova_dedup_FACT_utilize(sb);
+	nova_dedup_hasher_fini(&hasher);
 	kfree(buf);
-	kfree(sdesc);
-	crypto_free_shash(alg);
 	kfree(fingerprint);
 	return 0;
 }

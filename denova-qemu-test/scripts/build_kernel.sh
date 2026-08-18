@@ -50,6 +50,21 @@ if [ ! -f "$BUILD/.config" ] || [ "${RECONFIG:-0}" = "1" ]; then
     "${MK[@]}" olddefconfig
 fi
 
+# --- select the dedup fingerprint hash (fs/nova/Kconfig 'choice') ----------
+#     HASH=xxhash (default) | crc32c | sha1. Applied on every build so the
+#     three can be benchmarked back-to-back: `HASH=crc32c bash build_kernel.sh`.
+HASH="${HASH:-xxhash}"
+case "$HASH" in
+    xxhash) HSYM=NOVA_DEDUP_HASH_XXHASH ;;
+    crc32c) HSYM=NOVA_DEDUP_HASH_CRC32C ;;
+    sha1)   HSYM=NOVA_DEDUP_HASH_SHA1 ;;
+    *) echo "unknown HASH=$HASH (use: xxhash | crc32c | sha1)"; exit 1 ;;
+esac
+"$SRC/scripts/config" --file "$BUILD/.config" \
+    -d NOVA_DEDUP_HASH_XXHASH -d NOVA_DEDUP_HASH_CRC32C -d NOVA_DEDUP_HASH_SHA1 -e "$HSYM"
+"${MK[@]}" olddefconfig >/dev/null
+echo "=== dedup fingerprint hash: $HASH ($(grep -E '^CONFIG_NOVA_DEDUP_HASH_(XXHASH|CRC32C|SHA1)=' "$BUILD/.config")) ==="
+
 echo "=== build bzImage ==="
 "${MK[@]}" -j"$JOBS" bzImage
 echo "=== DONE: $BUILD/arch/x86/boot/bzImage ==="

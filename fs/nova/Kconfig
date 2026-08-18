@@ -14,3 +14,51 @@ config NOVA_FS
 	  called nova.
 
 	  If unsure, say N.
+
+choice
+	prompt "DeNOVA dedup fingerprint hash"
+	depends on NOVA_FS
+	default NOVA_DEDUP_HASH_XXHASH
+	help
+	  Content-fingerprint algorithm used by the offline deduplication
+	  daemon. A fingerprint collision can never corrupt data: FACT_insert
+	  byte-compares the two candidate blocks before merging them, so a fast
+	  non-cryptographic hash is safe here and much cheaper than SHA-1.
+
+	  Note: the on-disk FACT stores fingerprints in this algorithm. Changing
+	  it does not corrupt an existing filesystem (byte-verify still applies),
+	  but the daemon will not match blocks fingerprinted by the old algorithm
+	  until the table is rebuilt with a fresh "mount -o init".
+
+config NOVA_DEDUP_HASH_XXHASH
+	bool "xxhash (fast, whole-block avalanche; recommended)"
+	select XXHASH
+	help
+	  128-bit fingerprint from two xxh64 passes. Whole-block avalanche
+	  (any single-byte change scrambles all 128 bits), so no single-region
+	  collision weakness and no hash-bucket clustering on shared prefixes.
+	  ~10x faster than SHA-1. The recommended default.
+
+config NOVA_DEDUP_HASH_CRC32C
+	bool "CRC32C (fastest, hardware-accelerated; weaker distribution)"
+	select CRC32
+	select LIBCRC32C
+	help
+	  128-bit fingerprint from four hardware CRC32C words (one per 1KB
+	  quarter). Fastest option where the CPU has the CRC32 instruction, but
+	  a single-quarter difference collides at only 2^-32 and the hash bucket
+	  depends only on the first 1KB (prefix clustering). Correctness is still
+	  guaranteed by byte-verify; efficiency may suffer on adversarial data.
+
+config NOVA_DEDUP_HASH_SHA1
+	bool "SHA-1 (cryptographic, slowest; original DeNOVA behavior)"
+	select CRYPTO
+	select CRYPTO_HASH
+	select CRYPTO_SHA1
+	help
+	  160-bit cryptographic fingerprint, as in the original DeNOVA. Kept for
+	  comparison and for reproducing legacy behavior; far slower than the
+	  non-cryptographic options with no correctness benefit now that
+	  FACT_insert byte-verifies before merging.
+
+endchoice
