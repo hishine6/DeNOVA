@@ -1,9 +1,11 @@
 #!/bin/bash
 # build_initramfs.sh — HARSH end-to-end DeNOVA dedup test: many files, heavy
 # read/write + rewrite churn, repeated unmount/remount (exercises FACT
-# recovery), automatic (background daemon) dedup, and delete churn (exercises
-# nova_dedup_is_duplicate) -- all with per-block content verification. Prints
-# ">>> HARSH TEST PASS" iff every check passes with no oops and no
+# recovery), event-driven background-daemon dedup, and a phase of concurrent
+# write+delete churn (exercises nova_dedup_is_duplicate racing the daemon --
+# the FACT concurrency path). Per-block content is verified throughout. Prints
+# ">>> HARSH TEST PASS" iff every check passes with no oops, no data
+# corruption (double-free / "already in free list" / assertion), and no
 # "IAA Infinite loop". Needs the busybox-static package on the host.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,15 +59,18 @@ c=1; while [ $c -le 2 ]; do
   echo "remount c$c OK"; dmesg | grep -i "FACT recovery" | tail -1
   i=1; while [ $i -le $NF ]; do S /mnt/nova/f$i.dat verify $NB $(nd $i) || { echo "c$c f$i CORRUPT"; FAIL=1; }; i=$((i+1)); done
   S /mnt/nova/a$c.dat write $NB 16          # no trigger: the daemon dedups it
-  sync; sleep 12; sync
+  sync; sleep 8; sync
   AB=$(blk /mnt/nova/a$c.dat)
   if [ "$AB" -lt 2000 ]; then echo "auto-dedup c$c OK ($AB sectors)"; else echo "auto-dedup c$c FAIL ($AB)"; FAIL=1; fi
   S /mnt/nova/a$c.dat verify $NB 16 || { echo "a$c CORRUPT"; FAIL=1; }
   c=$((c+1))
 done
 
-echo "--- Phase 4: delete churn (is_duplicate block-free) ---"
-rm -f /mnt/nova/f1.dat /mnt/nova/f3.dat /mnt/nova/a1.dat; sync; echo "deleted 3 files"
+echo "--- Phase 4: concurrent write+delete churn (is_duplicate vs daemon) ---"
+( j=0; while [ $j -lt 40 ]; do S /mnt/nova/t$((j%5)).dat write 400 4 >/dev/null 2>&1; j=$((j+1)); done ) &
+( j=0; while [ $j -lt 40 ]; do rm -f /mnt/nova/t$((j%5)).dat 2>/dev/null; j=$((j+1)); done ) &
+wait; sync
+rm -f /mnt/nova/f1.dat /mnt/nova/f3.dat /mnt/nova/a1.dat; sync; echo "churn + delete done"
 
 echo "--- Phase 5: final remount + verify survivors ---"
 umount /mnt/nova && echo "final umount OK"
@@ -74,9 +79,9 @@ for i in 2 4; do S /mnt/nova/f$i.dat verify $NB $(nd $i) || { echo "final f$i CO
 S /mnt/nova/a2.dat verify $NB 16 || { echo "final a2 CORRUPT"; FAIL=1; }
 umount /mnt/nova && echo "final umount2 OK"
 
-OOPS=$(dmesg | grep -icE "BUG:|Oops|Call Trace|general protection|kernel NULL")
+OOPS=$(dmesg | grep -icE "BUG:|Oops|Call Trace|general protection|kernel NULL|already in free list|assertion failed|free .* failed")
 IAA=$(dmesg | grep -c "IAA Infinite")
-echo "================= RESULT: FAIL=$FAIL oops=$OOPS iaa=$IAA ================="
+echo "================= RESULT: FAIL=$FAIL oops/corruption=$OOPS iaa=$IAA ================="
 if [ "$FAIL" = 0 ] && [ "$OOPS" = 0 ] && [ "$IAA" = 0 ]; then echo ">>> HARSH TEST PASS"; else echo ">>> HARSH TEST FAIL"; fi
 poweroff -f
 IEOF

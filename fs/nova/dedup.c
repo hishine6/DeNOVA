@@ -3,7 +3,17 @@
 #include "dedup.h"
 
 /******************** FACT DRAM data structure *****************/
-struct DeNOVA_bm *FACT_free_list; // For allocating new  indirect access area 
+struct DeNOVA_bm *FACT_free_list; // For allocating new  indirect access area
+
+/*
+ * Serializes every FACT-entry modification (insert / reference-count update /
+ * reorder / is_duplicate) so the background dedup daemon and concurrent block
+ * frees cannot race on the non-atomic count RMW or the chain links (which
+ * otherwise corrupts reference counts -> premature/double free). This is a
+ * leaf lock: no other lock is acquired while it is held (it is always taken
+ * inside the inode lock), so it cannot deadlock with the inode/sb/journal locks.
+ */
+static DEFINE_MUTEX(nova_fact_lock);
 
 /******** EMULATE **************/
 void nova_dedup_read_emulate(unsigned long size){
@@ -18,6 +28,10 @@ void nova_dedup_read_emulate(unsigned long size){
 
 /******************** DEDUP QUEUE ********************/
 struct nova_dedup_queue dqueue;
+
+/* Woken by nova_dedup_queue_push() when new work is enqueued, so the dedup
+ * daemon sleeps while idle instead of polling on a fixed timer. */
+static DECLARE_WAIT_QUEUE_HEAD(nova_dedup_wait);
 
 // Initialize Dedup Queue
 int nova_dedup_queue_init(void){
@@ -35,6 +49,12 @@ int nova_dedup_queue_push(u64 new_address, u64 target_inode_number){
 
 	mutex_lock(&dqueue.lock);
 	new_data = kmalloc(sizeof(struct nova_dedup_queue_entry), GFP_KERNEL);
+	if (!new_data) {
+		/* Out of memory: skip dedup for this write entry. The write
+		 * itself is unaffected; it just won't be deduplicated. */
+		mutex_unlock(&dqueue.lock);
+		return -ENOMEM;
+	}
 	list_add_tail(&new_data->list, &dqueue.head.list);
 	new_data->write_entry_address = new_address;
 	new_data->target_inode_number = target_inode_number;
@@ -42,6 +62,7 @@ int nova_dedup_queue_push(u64 new_address, u64 target_inode_number){
 	//new_data->start_nsec = start_time.tv_nsec;
 	//printk("Insert time well inserted: %lu sec %lu nsec\n",new_data->start_time.tv_sec,new_data->start_time.tv_nsec);
 	mutex_unlock(&dqueue.lock);
+	wake_up_interruptible(&nova_dedup_wait);	/* nudge the dedup daemon */
 
 	//printk("dqueue-PUSH(Write Entry Address: %llu, Inode Number: %llu)\n",new_address,target_inode_number);
 	return 0;
@@ -443,7 +464,16 @@ int nova_dedup_FACT_index_head(u64 index){
 }
 
 // Update Count after tail has been updated. 
-int nova_dedup_FACT_update_count(struct super_block *sb, u64 index){
+static int nova_dedup_FACT_update_count_locked(struct super_block *sb, u64 index);
+int nova_dedup_FACT_update_count(struct super_block *sb, u64 index)
+{
+	int ret;
+	mutex_lock(&nova_fact_lock);
+	ret = nova_dedup_FACT_update_count_locked(sb, index);
+	mutex_unlock(&nova_fact_lock);
+	return ret;
+}
+static int nova_dedup_FACT_update_count_locked(struct super_block *sb, u64 index){
 	u64 count = 0;
 	u64 compare = ((unsigned long)1<<32)-1;
 	struct fact_entry* target_entry;
@@ -507,7 +537,16 @@ int nova_dedup_FACT_read(struct super_block *sb, u64 index){
 	return 0;
 }
 
-int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_data* lookup){
+static int nova_dedup_FACT_insert_locked(struct super_block *sb, struct fingerprint_lookup_data* lookup);
+int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_data* lookup)
+{
+	int ret;
+	mutex_lock(&nova_fact_lock);
+	ret = nova_dedup_FACT_insert_locked(sb, lookup);
+	mutex_unlock(&nova_fact_lock);
+	return ret;
+}
+static int nova_dedup_FACT_insert_locked(struct super_block *sb, struct fingerprint_lookup_data* lookup){
 	unsigned long irq_flags=0;
 	struct fact_entry  te; // target entry
 	struct fact_entry* pmem_te; // pmem target entry
@@ -754,7 +793,16 @@ int nova_dedup_entry_update(struct super_block *sb, struct nova_inode_info_heade
 // Return 1 if it's okay to delete - reference count = 0
 // Return 0 if it's not okay to delete - reference count > 0
 // Return 2 if it's not in FACT table - reference count < 0
-int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool check){
+static int nova_dedup_is_duplicate_locked(struct super_block *sb, unsigned long blocknr, bool check);
+int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool check)
+{
+	int ret;
+	mutex_lock(&nova_fact_lock);
+	ret = nova_dedup_is_duplicate_locked(sb, blocknr, check);
+	mutex_unlock(&nova_fact_lock);
+	return ret;
+}
+static int nova_dedup_is_duplicate_locked(struct super_block *sb, unsigned long blocknr, bool check){
 	unsigned long irq_flags=0;
 	struct fact_entry* pmem_te; // pmem target entry
 	struct fact_entry* delete_te;
@@ -1152,7 +1200,10 @@ static int nova_dedup_daemon(void *arg)
 	nova_info("Start NOVA dedup daemon (DD)\n");
 	while (!kthread_should_stop()) {
 		nova_dedup_run(sb);
-		schedule_timeout_interruptible(
+		/* Sleep until queue_push() wakes us, we are asked to stop, or a
+		 * periodic safety timeout fires -- no busy polling when idle. */
+		wait_event_interruptible_timeout(nova_dedup_wait,
+			kthread_should_stop() || !list_empty(&dqueue.head.list),
 			msecs_to_jiffies(DEDUP_DAEMON_INTERVAL_MS));
 	}
 	nova_info("NOVA dedup daemon stopped\n");
