@@ -907,9 +907,12 @@ int nova_dedup_test(struct file * filp){
 		}
 		// Read TI(Target Inode)
 		target_inode = nova_iget(sb,target_inode_number);
-		// Inode Could've been deleted
-		if(target_inode == ERR_PTR(-ESTALE)){
-			//nova_info("%s: inode %llu does not exist.", __func__,target_inode_number);	
+		// Inode could've been deleted (-ESTALE), or nova_iget() failed for
+		// another reason (-ENOMEM/-EIO/...). IS_ERR() catches every error
+		// pointer so we never dereference one below; no ref was taken on
+		// failure, so just skip this entry.
+		if(IS_ERR(target_inode)){
+			//nova_info("%s: inode %llu does not exist.", __func__,target_inode_number);
 			//iput(target_inode);	// Release Inode
 			continue;
 		}
