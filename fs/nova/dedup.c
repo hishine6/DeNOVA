@@ -332,7 +332,7 @@ int nova_dedup_FACT_reorder(struct super_block *sb, u64 head_index){
 	unsigned long *reorder;
 	unsigned long irq_flags=0;
 	unsigned long tmp1;
-	int tmp2;
+	unsigned long tmp2;	/* holds a FACT entry index; int would truncate */
 	int i,j,hops=0;
 
 	printk("Reorder Start\n");
@@ -355,7 +355,7 @@ int nova_dedup_FACT_reorder(struct super_block *sb, u64 head_index){
 		target_entry = (struct fact_entry *) nova_get_block(sb, target_index);
 
 		weight[i] = target_entry->count>>32;
-		reorder[i] = target_index;
+		reorder[i] = curr_index;	/* entry index (used later as reorder[i]*ENTRY_SIZE), not the byte offset */
 
 		curr_index = target_entry->next;
 	}
@@ -368,7 +368,7 @@ int nova_dedup_FACT_reorder(struct super_block *sb, u64 head_index){
 				tmp2=reorder[j];
 
 				weight[j] = weight[j+1];
-				reorder[j] = weight[j+1];
+				reorder[j] = reorder[j+1];	/* was weight[j+1] -- corrupted the index array */
 
 				weight[j+1] = tmp1;
 				reorder[j+1] = tmp2;
