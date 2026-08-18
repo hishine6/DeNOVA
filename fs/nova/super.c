@@ -799,6 +799,15 @@ setup_sb:
 				__func__, retval);
 			goto out;
 		}
+
+		/* DEDUP: a fresh format sets up the dedup queue and FACT via
+		 * nova_init() -> nova_dedup_FACT_init(). On a non-format mount
+		 * nova_init() does not run, so rebuild the in-DRAM dedup state
+		 * (queue + FACT free-list) from the persistent FACT here --
+		 * otherwise the queue and free-list are uninitialised and the
+		 * first write / dedup after mount dereferences them. */
+		nova_dedup_queue_init();
+		nova_dedup_FACT_recovery(sb);
 	}
 
 	root_i = nova_iget(sb, NOVA_ROOT_INO);

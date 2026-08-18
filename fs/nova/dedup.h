@@ -85,6 +85,7 @@ struct fingerprint_lookup_data{
 void nova_dedup_read_emulate(unsigned long size);
 
 int nova_dedup_FACT_init(struct super_block *sb);
+int nova_dedup_FACT_recovery(struct super_block *sb);
 int nova_dedup_FACT_read(struct super_block *sb, u64 index);
 
 int nova_dedup_test(struct file *);

@@ -276,10 +276,25 @@ int nova_dedup_FACT_recovery(struct super_block *sb){
 
 
 	struct fact_entry *target_entry;
+	unsigned long live = 0;
 
+	/* A remount may already hold a DRAM free-list from a prior mount in this
+	 * boot; free it so we rebuild cleanly from the persistent FACT. */
+	if (FACT_free_list) {
+		kvfree(FACT_free_list->bitmap);
+		kfree(FACT_free_list);
+		FACT_free_list = NULL;
+	}
 	FACT_free_list = kzalloc(sizeof(struct DeNOVA_bm),GFP_KERNEL);
+	if (!FACT_free_list)
+		return -ENOMEM;
 	FACT_free_list->bitmap_size = FACT_TABLE_INDEX_MAX;
 	FACT_free_list->bitmap = kvzalloc(FACT_TABLE_INDEX_MAX,GFP_KERNEL);
+	if (!FACT_free_list->bitmap) {
+		kfree(FACT_free_list);
+		FACT_free_list = NULL;
+		return -ENOMEM;
+	}
 
 	for(i = start; i<=end;i++){
 		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + i * NOVA_FACT_ENTRY_SIZE;
@@ -292,8 +307,8 @@ int nova_dedup_FACT_recovery(struct super_block *sb){
 		// (a byte offset up to ~2GB) which would set_bit() far past the end
 		// of the bitmap and corrupt the heap.
 		if(r_count > 0){
-			// TODO Check if block is in free list
-			set_bit(i,FACT_free_list->bitmap); // set the bit of entry index
+			set_bit(i,FACT_free_list->bitmap); // mark this entry's slot in use
+			live++;
 		}
 
 		// Set Update Count to 0: discard in-progress (uncommitted) increments.
@@ -307,20 +322,17 @@ int nova_dedup_FACT_recovery(struct super_block *sb){
 			nova_memlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE, &irq_flags);
 		}
 
-		// Check reordering process
-		if(target_index < FACT_TABLE_INDIRECT_AREA_START_INDEX && target_entry->prev != 0){
-			if(target_entry->prev == target_index){
-				// Undo reorder process
-				nova_dedup_FACT_reorder_undo(sb,target_index);
-			}
-			else{
-				// continue reorder
-				nova_dedup_FACT_reorder_recover(sb, target_index, target_entry->prev);
-			}
-		}
+		/*
+		 * The old prev-marker reorder-recovery protocol was retired with
+		 * the FACT_reorder rewrite (reorder is not crash-atomic yet), so
+		 * there is no in-progress reorder marker to undo here. A clean
+		 * unmount leaves a fully consistent FACT; recovering uncommitted
+		 * chain edits after a crash is still future work.
+		 */
 	}
 
-	return 1;
+	nova_info("FACT recovery rebuilt free-list, %lu live entries\n", live);
+	return 0;
 }
 
 int nova_dedup_FACT_reorder(struct super_block *sb, u64 head_index){
