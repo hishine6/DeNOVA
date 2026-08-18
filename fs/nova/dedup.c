@@ -45,6 +45,12 @@ int nova_dedup_queue_push(u64 new_address, u64 target_inode_number){
 
 	mutex_lock(&dqueue.lock);
 	new_data = kmalloc(sizeof(struct nova_dedup_queue_entry), GFP_KERNEL);
+	if (!new_data) {
+		/* Out of memory: skip dedup for this write entry. The write
+		 * itself is unaffected; it just won't be deduplicated. */
+		mutex_unlock(&dqueue.lock);
+		return -ENOMEM;
+	}
 	list_add_tail(&new_data->list, &dqueue.head.list);
 	new_data->write_entry_address = new_address;
 	new_data->target_inode_number = target_inode_number;
