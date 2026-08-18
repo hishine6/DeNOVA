@@ -65,6 +65,26 @@ pass over 20000 distinct 4 KB blocks (TCG, daemon off) gives roughly:
 | crc32c |     0.35 s | 223.2 MB/s |     3.8x |
 | xxhash |     0.30 s | 260.4 MB/s |     4.4x |
 
+(Isolating the dedup pass needs the background daemon off; the timing harness
+used to produce these numbers commented out `nova_dedup_daemon_init()`.)
+
+### Mount / recovery (opt #3)
+
+Recovery rebuilds the FACT free-list from a persistent checkpoint on a clean
+unmount, scanning only the used indirect (IAA) range instead of the whole 2 GB
+table:
+
+```sh
+bash scripts/bench_mount.sh    && bash scripts/run.sh   # times format + recovery
+bash scripts/test_iaa_recovery.sh && bash scripts/run.sh  # fast-path correctness
+```
+
+`bench_mount.sh` reports recovery dropping from ~1.65 s (full scan) to ~0.10 s.
+`test_iaa_recovery.sh` writes enough distinct blocks to force live IAA chain
+entries (e.g. 387), confirms the fast path rebuilds exactly those and that
+further allocations from the rebuilt free-list dedup and verify cleanly (a
+missed live slot would corrupt) — it prints `>>> IAA RECOVERY PASS`.
+
 ## What the default (harsh) test does
 
 `build_initramfs.sh` builds a comprehensive stress test that prints
