@@ -831,6 +831,11 @@ setup_sb:
 
 	nova_print_curr_epoch_id(sb);
 
+	/* DEDUP: start the background dedup daemon now that the dedup queue and
+	 * FACT are ready (set up by nova_init() on format, or FACT_recovery
+	 * above on a normal mount). */
+	nova_dedup_daemon_init(sb);
+
 	retval = 0;
 	NOVA_END_TIMING(mount_t, mount_time);
 	return retval;
@@ -952,6 +957,9 @@ static void nova_put_super(struct super_block *sb)
 	int i;
 
 	nova_print_curr_epoch_id(sb);
+
+	/* DEDUP: stop the background dedup daemon before tearing anything down. */
+	nova_dedup_daemon_stop(sb);
 
 	/* It's unmount time, so unmap the nova memory */
 //	nova_print_free_lists(sb);

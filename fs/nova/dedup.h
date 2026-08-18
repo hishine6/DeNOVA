@@ -14,6 +14,7 @@
 #include <linux/fsnotify.h>
 #include <linux/ktime.h>
 #include <linux/timekeeping.h>
+#include <linux/kthread.h>
 
 // SHA1
 #include <crypto/hash.h>
@@ -32,6 +33,9 @@
 #define IN_PROCESS 2
 
 #define REORDER_THRESHOLD 150
+
+/* Background dedup daemon (DD): drain the dedup queue every this many ms. */
+#define DEDUP_DAEMON_INTERVAL_MS 2000
 
 
 /* nova_dedup_queue
@@ -89,6 +93,8 @@ int nova_dedup_FACT_recovery(struct super_block *sb);
 int nova_dedup_FACT_read(struct super_block *sb, u64 index);
 
 int nova_dedup_test(struct file *);
+int nova_dedup_daemon_init(struct super_block *sb);
+void nova_dedup_daemon_stop(struct super_block *sb);
 int nova_dedup_queue_push(u64,u64);
 int nova_dedup_queue_init(void);
 

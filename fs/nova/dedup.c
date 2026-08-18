@@ -842,12 +842,10 @@ int nova_dedup_is_duplicate(struct super_block *sb, unsigned long blocknr, bool 
 
 
 /******************** DEDUPLICATION MAIN FUNCTION ********************/
-int nova_dedup_test(struct file * filp){
-	// Read Super Block
-	struct address_space *mapping = filp->f_mapping;	
-	struct inode *garbage_inode = mapping->host;
-	struct super_block *sb = garbage_inode->i_sb;
-
+/* Core offline-dedup pass: drain the dedup queue for this superblock. Shared
+ * by the manual syscall trigger (nova_dedup_test) and the background daemon
+ * (nova_dedup_daemon); nova_dedup_run() serializes callers. */
+static int nova_dedup_core(struct super_block *sb){
 	// How many deduplications are going to be done each time?
 	int dedup_loop_count = 20000; // this is 'n'
 
@@ -1123,4 +1121,63 @@ out2:
 	crypto_free_shash(alg);
 	kfree(fingerprint);
 	return 0;
+}
+
+/* Serialize dedup runs so the daemon and the manual syscall trigger never
+ * process the (global) FACT concurrently. */
+static DEFINE_MUTEX(nova_dedup_run_lock);
+
+static int nova_dedup_run(struct super_block *sb)
+{
+	int ret;
+
+	mutex_lock(&nova_dedup_run_lock);
+	ret = nova_dedup_core(sb);
+	mutex_unlock(&nova_dedup_run_lock);
+	return ret;
+}
+
+/* Manual trigger via the dedup syscall (file->f_op->dedup). */
+int nova_dedup_test(struct file *filp)
+{
+	return nova_dedup_run(filp->f_mapping->host->i_sb);
+}
+
+/* Background dedup daemon (DD): periodically drain the dedup queue so dedup
+ * happens automatically, instead of only when the syscall is called. */
+static int nova_dedup_daemon(void *arg)
+{
+	struct super_block *sb = arg;
+
+	nova_info("Start NOVA dedup daemon (DD)\n");
+	while (!kthread_should_stop()) {
+		nova_dedup_run(sb);
+		schedule_timeout_interruptible(
+			msecs_to_jiffies(DEDUP_DAEMON_INTERVAL_MS));
+	}
+	nova_info("NOVA dedup daemon stopped\n");
+	return 0;
+}
+
+int nova_dedup_daemon_init(struct super_block *sb)
+{
+	struct nova_sb_info *sbi = NOVA_SB(sb);
+
+	sbi->dedup_thread = kthread_run(nova_dedup_daemon, sb, "nova_dedupd");
+	if (IS_ERR(sbi->dedup_thread)) {
+		nova_err(sb, "Failed to start NOVA dedup daemon\n");
+		sbi->dedup_thread = NULL;
+		return -1;
+	}
+	return 0;
+}
+
+void nova_dedup_daemon_stop(struct super_block *sb)
+{
+	struct nova_sb_info *sbi = NOVA_SB(sb);
+
+	if (sbi->dedup_thread) {
+		kthread_stop(sbi->dedup_thread);
+		sbi->dedup_thread = NULL;
+	}
 }
