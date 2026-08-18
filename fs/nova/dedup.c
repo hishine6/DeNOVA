@@ -288,17 +288,21 @@ int nova_dedup_FACT_recovery(struct super_block *sb){
 		r_count = target_entry->count>>32;
 		u_count = target_entry->count & (((long)1<<32)-1);
 
-		// Rebuild FACT_free_list
+		// Rebuild FACT_free_list. Index by entry number i, NOT target_index
+		// (a byte offset up to ~2GB) which would set_bit() far past the end
+		// of the bitmap and corrupt the heap.
 		if(r_count > 0){
 			// TODO Check if block is in free list
-			set_bit(target_index,FACT_free_list->bitmap); // set the bit of index
+			set_bit(i,FACT_free_list->bitmap); // set the bit of entry index
 		}
 
-		// Set Update Count to 0
-		if(r_count != 0){
+		// Set Update Count to 0: discard in-progress (uncommitted) increments.
+		// Subtract u_count (the low 32 bits), not r_count -- subtracting the
+		// reference count corrupts the packed count field.
+		if(u_count != 0){
 			nova_memunlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE, &irq_flags);
 			PERSISTENT_BARRIER();
-			target_entry->count -= r_count;
+			target_entry->count -= u_count;
 			nova_flush_buffer(&target_entry->count,CACHELINE_SIZE,1);
 			nova_memlock_range(sb,target_entry,NOVA_FACT_ENTRY_SIZE, &irq_flags);
 		}
