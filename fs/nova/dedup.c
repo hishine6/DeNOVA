@@ -624,6 +624,10 @@ int nova_dedup_FACT_insert(struct super_block *sb, struct fingerprint_lookup_dat
 		else{	// write in IAA
 			prev_index = index;
 			index = find_next_zero_bit(FACT_free_list->bitmap,FACT_free_list->bitmap_size,FACT_TABLE_INDIRECT_AREA_START_INDEX);
+			if(index >= FACT_free_list->bitmap_size){ // IAA full: no free slot -> bail instead of writing out of range
+				printk("FACT IAA full: no free indirect slot\n");
+				return 2;
+			}
 			set_bit(index,FACT_free_list->bitmap);
 		}
 
@@ -1012,7 +1016,12 @@ int nova_dedup_test(struct file * filp){
 			for(i=0;i<num_pages;i++)
 				if(duplicate_check[i] != 2){
 					duplicate_check[i] = nova_dedup_FACT_insert(sb,&lookup_data[i]);
-					num_new_entry += duplicate_check[i];
+					// count only real duplicates (1); 0 = unique, 2 = insert
+					// error. Adding the raw return counted a '2' as two new
+					// entries, which are never appended -> the write phase
+					// then failed with "Datapage assign error".
+					if(duplicate_check[i] == 1)
+						num_new_entry++;
 				}
 			//Test
 		/*	
