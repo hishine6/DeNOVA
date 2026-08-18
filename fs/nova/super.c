@@ -964,6 +964,9 @@ static void nova_put_super(struct super_block *sb)
 	/* It's unmount time, so unmap the nova memory */
 //	nova_print_free_lists(sb);
 	if (sbi->virt_addr) {
+		/* DEDUP: persist the FACT recovery checkpoint (daemon is stopped, so
+		 * the free-list is quiescent) to enable the fast mount path. */
+		nova_dedup_FACT_checkpoint(sb);
 		nova_save_snapshots(sb);
 		kmem_cache_free(nova_inode_cachep, sbi->snapshot_si);
 		nova_save_inode_list_to_log(sb);

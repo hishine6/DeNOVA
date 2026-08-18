@@ -6,6 +6,59 @@
 struct DeNOVA_bm *FACT_free_list; // For allocating new  indirect access area
 
 /*
+ * Persistent FACT recovery checkpoint (opt #3). Stored in reserved block 2
+ * (blocks 2-15 are unused; see the layout in super.h). It lets a *clean*
+ * remount skip the full O(table) FACT scan: on a clean unmount every reference
+ * is committed (u_count == 0, since the daemon only stops at pass boundaries)
+ * and every used indirect (IAA) slot lies in [IAA_START, hwm) (find_next_zero_bit
+ * packs allocations upward), so recovery only rebuilds the free-list from that
+ * range. Direct-area free-list bits are never read for allocation, so they need
+ * not be rebuilt. Self-validating: a wrong magic, a cleared clean flag (mount
+ * always clears it, so any crash forces a rescan), or a changed table size all
+ * fall back to the full scan -- the fast path can never mis-recover.
+ */
+#define NOVA_FACT_CKPT_BLOCK	2
+#define NOVA_FACT_CKPT_MAGIC	0x54434146U	/* "FACT" */
+struct nova_fact_ckpt {
+	__le32 magic;
+	__le32 clean;		/* 1 iff written by a clean unmount */
+	__le64 hwm;		/* highest used IAA index + 1 */
+	__le64 index_max;	/* FACT_TABLE_INDEX_MAX when written */
+};
+
+static struct nova_fact_ckpt *nova_fact_ckpt(struct super_block *sb)
+{
+	return (struct nova_fact_ckpt *)nova_get_block(sb,
+		(u64)NOVA_FACT_CKPT_BLOCK * NOVA_DEF_BLOCK_SIZE_4K);
+}
+
+static void nova_fact_ckpt_write(struct super_block *sb, u32 clean, u64 hwm)
+{
+	struct nova_fact_ckpt *c = nova_fact_ckpt(sb);
+	unsigned long irq_flags = 0;
+	struct nova_fact_ckpt v = {
+		.magic = cpu_to_le32(NOVA_FACT_CKPT_MAGIC),
+		.clean = cpu_to_le32(0),		/* body first, clean=0 */
+		.hwm = cpu_to_le64(hwm),
+		.index_max = cpu_to_le64(FACT_TABLE_INDEX_MAX),
+	};
+
+	nova_memunlock_range(sb, c, sizeof(*c), &irq_flags);
+	memcpy_to_pmem_nocache(c, &v, sizeof(v));
+	nova_memlock_range(sb, c, sizeof(*c), &irq_flags);
+
+	if (clean) {
+		/* Publish clean=1 only after the body is durable, as a final
+		 * store -- a crash mid-checkpoint leaves clean=0 => full rescan. */
+		PERSISTENT_BARRIER();
+		nova_memunlock_range(sb, c, sizeof(*c), &irq_flags);
+		c->clean = cpu_to_le32(1);
+		nova_flush_buffer(&c->clean, CACHELINE_SIZE, 1);
+		nova_memlock_range(sb, c, sizeof(*c), &irq_flags);
+	}
+}
+
+/*
  * FACT modification locking (opt #2): a bucket-sharded array of leaf mutexes
  * instead of one global lock. Every FACT-entry modification (insert /
  * reference-count update / reorder / is_duplicate) is serialized against
@@ -344,9 +397,20 @@ int nova_dedup_FACT_init(struct super_block *sb){
 	memset(fill,0,64);
 
 	FACT_free_list = kzalloc(sizeof(struct DeNOVA_bm),GFP_KERNEL);
+	if (!FACT_free_list)
+		return 0;
 	FACT_free_list->bitmap_size = FACT_TABLE_INDEX_MAX;
 	FACT_free_list->bitmap = kvzalloc(FACT_TABLE_INDEX_MAX,GFP_KERNEL);
+	if (!FACT_free_list->bitmap) {
+		kfree(FACT_free_list);
+		FACT_free_list = NULL;
+		return 0;
+	}
 
+	/* Zero the whole FACT (2GB). This one-time format cost is left as the
+	 * per-entry non-temporal write; batching the unlock/flush was measurably
+	 * slower on this emulator. The per-mount cost is what opt #3 targets --
+	 * see the recovery fast path and the checkpoint below. */
 	for(i =start; i<=end;i++){
 		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + i * NOVA_FACT_ENTRY_SIZE;
 		target_entry = (struct fact_entry*)nova_get_block(sb,target_index);
@@ -355,6 +419,10 @@ int nova_dedup_FACT_init(struct super_block *sb){
 		memcpy_to_pmem_nocache(target_entry, &fill,64);
 		nova_memlock_range(sb,target_entry,64,&irq_flags);
 	}
+
+	/* Valid magic, clean=0 (a crash before the first clean unmount forces a
+	 * full scan), empty table (hwm = IAA_START). */
+	nova_fact_ckpt_write(sb, 0, FACT_TABLE_INDIRECT_AREA_START_INDEX);
 	return 1;
 }
 
@@ -458,6 +526,42 @@ int nova_dedup_FACT_recovery(struct super_block *sb){
 		return -ENOMEM;
 	}
 
+	/*
+	 * opt #3 fast path: after a clean unmount the used IAA slots are packed in
+	 * [IAA_START, hwm) and no u_count is uncommitted, so rebuild the free-list
+	 * from that range only and skip the full 2GB scan. Decide from the
+	 * checkpoint, then clear its clean flag on media so any crash before the
+	 * next clean unmount forces the full scan below.
+	 */
+	{
+		struct nova_fact_ckpt *c = nova_fact_ckpt(sb);
+		bool fast = le32_to_cpu(c->magic) == NOVA_FACT_CKPT_MAGIC &&
+			    le32_to_cpu(c->clean) == 1 &&
+			    le64_to_cpu(c->index_max) == FACT_TABLE_INDEX_MAX;
+		u64 hwm = fast ? le64_to_cpu(c->hwm) : 0;
+
+		if (fast && hwm > (u64)FACT_TABLE_INDEX_MAX + 1)
+			fast = false;			/* corrupt hwm -> distrust */
+
+		nova_fact_ckpt_write(sb, 0, hwm);	/* invalidate checkpoint */
+
+		if (fast) {
+			for (i = FACT_TABLE_INDIRECT_AREA_START_INDEX; i < hwm; i++) {
+				target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + i * NOVA_FACT_ENTRY_SIZE;
+				target_entry = (struct fact_entry*)nova_get_block(sb,target_index);
+				if ((target_entry->count >> 32) > 0) {
+					set_bit(i, FACT_free_list->bitmap);
+					live++;
+				}
+			}
+			nova_info("FACT recovery (clean fast path): %lu live IAA entries in [%lu,%llu)\n",
+				live, (unsigned long)FACT_TABLE_INDIRECT_AREA_START_INDEX, hwm);
+			return 0;
+		}
+	}
+
+	/* Full O(table) scan: crash recovery, first mount after format, or a
+	 * config/table-size change since the checkpoint was written. */
 	for(i = start; i<=end;i++){
 		target_index = NOVA_DEF_BLOCK_SIZE_4K * FACT_TABLE_START + i * NOVA_FACT_ENTRY_SIZE;
 		target_entry = (struct fact_entry*)nova_get_block(sb,target_index);
@@ -493,7 +597,27 @@ int nova_dedup_FACT_recovery(struct super_block *sb){
 		 */
 	}
 
-	nova_info("FACT recovery rebuilt free-list, %lu live entries\n", live);
+	nova_info("FACT recovery rebuilt free-list (full scan), %lu live entries\n", live);
+	return 0;
+}
+
+/*
+ * Persist the FACT recovery checkpoint on a clean unmount: record the used-IAA
+ * high-water mark so the next mount can take the fast path above. Called from
+ * nova_put_super() after the dedup daemon has stopped (pass boundary, so all
+ * u_counts are committed).
+ */
+int nova_dedup_FACT_checkpoint(struct super_block *sb){
+	unsigned long last;
+	u64 hwm = FACT_TABLE_INDIRECT_AREA_START_INDEX;
+
+	if (!FACT_free_list || !FACT_free_list->bitmap)
+		return 0;
+	last = find_last_bit(FACT_free_list->bitmap, FACT_free_list->bitmap_size);
+	if (last < FACT_free_list->bitmap_size && last + 1 > hwm)
+		hwm = last + 1;			/* highest used slot + 1 */
+	nova_fact_ckpt_write(sb, 1, hwm);
+	nova_info("FACT checkpoint written (clean, hwm=%llu)\n", hwm);
 	return 0;
 }
 
