@@ -44,19 +44,25 @@ Test size is tunable at initramfs-build time:
 NBLOCKS=40000 NDISTINCT=128 bash scripts/build_initramfs.sh
 ```
 
-## What the default test does
+## What the default (harsh) test does
 
-1. Mounts NOVA (`-o init`) on the emulated pmem (`/dev/pmem0` from
-   `memmap=8G!4G`).
-2. Writes `stress.dat` = `NBLOCKS` 4KB blocks cycling through `NDISTINCT`
-   distinct contents (so there are many duplicates and many distinct blocks).
-3. Runs the offline dedup pass (`syscall 335`).
-4. **Consistency check:** reads every block back and compares it to its
-   expected pattern. `CONSISTENCY PASS` means dedup preserved all data (it did
-   not merge non-identical blocks); the file should collapse to ~`NDISTINCT`
-   physical blocks.
-5. Deletes the file to exercise the block-free path
-   (`nova_dedup_is_duplicate`) and scans dmesg for oops/BUG.
+`build_initramfs.sh` builds a comprehensive stress test that prints
+`>>> HARSH TEST PASS` iff every check passes with no oops and no
+"IAA Infinite loop":
+
+1. Write several files, each a mix of duplicate and distinct 4KB blocks with
+   deterministic per-pattern content; run dedup; verify every block reads back
+   its pattern.
+2. Rewrite-churn round (heavy read/write) + dedup + verify.
+3. Unmount / remount twice (each remount exercises `nova_dedup_FACT_recovery`);
+   verify all files survived, then write a new file WITHOUT triggering the
+   syscall and confirm the background daemon (DD) deduplicates it on its own.
+4. Delete files to exercise the block-free path (`nova_dedup_is_duplicate`).
+5. Final remount + verify survivors; report FAIL/oops/IAA counts.
+
+`dedup_stress.c`'s content is a deterministic function of the pattern id, so a
+post-dedup read that returns the wrong bytes proves dedup merged non-identical
+blocks (or a chain/recovery operation corrupted the mapping).
 
 ### Reproducing the headline bug (FACT hash collapse)
 

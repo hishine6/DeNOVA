@@ -21,7 +21,7 @@ if [ ! -w /dev/kvm ]; then
 fi
 
 echo "=== booting (serial -> $OUT/serial.log) ==="
-timeout 600 qemu-system-x86_64 "${ACCEL[@]}" -smp 4 -m 16G \
+timeout 1200 qemu-system-x86_64 "${ACCEL[@]}" -smp 4 -m 16G \
   -kernel "$BZ" -initrd "$INITRD" \
   -append 'console=ttyS0 memmap=8G!4G rdinit=/init panic=1 loglevel=7' \
   -nographic -no-reboot \
