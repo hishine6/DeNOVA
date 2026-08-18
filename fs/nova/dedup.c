@@ -29,6 +29,10 @@ void nova_dedup_read_emulate(unsigned long size){
 /******************** DEDUP QUEUE ********************/
 struct nova_dedup_queue dqueue;
 
+/* Woken by nova_dedup_queue_push() when new work is enqueued, so the dedup
+ * daemon sleeps while idle instead of polling on a fixed timer. */
+static DECLARE_WAIT_QUEUE_HEAD(nova_dedup_wait);
+
 // Initialize Dedup Queue
 int nova_dedup_queue_init(void){
 	INIT_LIST_HEAD(&dqueue.head.list);
@@ -58,6 +62,7 @@ int nova_dedup_queue_push(u64 new_address, u64 target_inode_number){
 	//new_data->start_nsec = start_time.tv_nsec;
 	//printk("Insert time well inserted: %lu sec %lu nsec\n",new_data->start_time.tv_sec,new_data->start_time.tv_nsec);
 	mutex_unlock(&dqueue.lock);
+	wake_up_interruptible(&nova_dedup_wait);	/* nudge the dedup daemon */
 
 	//printk("dqueue-PUSH(Write Entry Address: %llu, Inode Number: %llu)\n",new_address,target_inode_number);
 	return 0;
@@ -1195,7 +1200,10 @@ static int nova_dedup_daemon(void *arg)
 	nova_info("Start NOVA dedup daemon (DD)\n");
 	while (!kthread_should_stop()) {
 		nova_dedup_run(sb);
-		schedule_timeout_interruptible(
+		/* Sleep until queue_push() wakes us, we are asked to stop, or a
+		 * periodic safety timeout fires -- no busy polling when idle. */
+		wait_event_interruptible_timeout(nova_dedup_wait,
+			kthread_should_stop() || !list_empty(&dqueue.head.list),
 			msecs_to_jiffies(DEDUP_DAEMON_INTERVAL_MS));
 	}
 	nova_info("NOVA dedup daemon stopped\n");
