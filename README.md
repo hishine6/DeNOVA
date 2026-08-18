@@ -23,10 +23,26 @@ PDF: [PDF](https://discos.sogang.ac.kr/file/2022/intl_conf/IPDPS_2022_J_Kwon.pdf
 ### Building DeNOVA
 To build DeNOVA refer to [Building and Using NOVA](##building-and-using-nova) in below. Before building the kernel image, it might need minor configuration. The size of the FACT is determined by the capacity of NVM. Currently, FACT is a static table. The size of the FACT should be modified accordingly to the NVM capacity. The modifications can be done in 'fs/nova/super.h'. Furthermore, the current version includes empty cycles during the read/write path to emulate the latency of NVM devices. This should be deleted when using an actual NVM device.
 
-### Working In Progress
-- We have found minor bugs during the reordering process. It has been detached for debugging.
-- The recovery process has not been fully implemented.
-- Currently the DD is triggered manually for debugging convenience.
+### Status
+- **Reordering: done.** The FACT collision-chain reordering was rewritten (the
+  bucket head is kept as the fixed anchor and only the indirect (IAA) nodes are
+  sorted by reference count) and re-enabled. It no longer detaches the chain,
+  and is exercised by the QEMU dedup test.
+- **Recovery: partially done.** Rebuilding the in-DRAM dedup state (the dedup
+  queue and the FACT free-list) on a non-format mount is now implemented and
+  verified across unmount/remount cycles. Recovering *uncommitted* dedup and
+  chain state after a crash (as opposed to a clean unmount) is still in
+  progress.
+- **Deduplication Daemon (DD): done.** The DD now runs automatically as a
+  background kernel thread (`nova_dedupd`) that drains the dedup queue
+  periodically; the manual `dedup` syscall trigger remains available.
+
+A batch of correctness fixes to the offline-dedup path (FACT hashing, PMEM
+access, fingerprint verification, recovery/reorder bookkeeping, allocation and
+error-handling) also landed. The `denova-qemu-test/` directory contains a QEMU
+harness that builds the kernel, boots it with an emulated pmem device, and runs
+a dedup consistency / recovery / daemon stress test so all of this can be
+re-verified.
 
 # NOVA: NOn-Volatile memory Accelerated log-structured file system
 
